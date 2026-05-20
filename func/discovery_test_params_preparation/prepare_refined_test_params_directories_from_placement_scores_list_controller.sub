@@ -1,0 +1,36 @@
+#!/bin/bash
+#BSUB -J cleanup_master
+#BSUB -W 168:00        # 168 hours = 7 days
+#BSUB -n 1
+#BSUB -R "rusage[mem=4GB]"   # adjust if needed
+#BSUB -o cleanup_master.out
+#BSUB -e cleanup_master.err
+#BSUB -q long
+
+
+
+################################################
+#User inputs: Edit per run
+################################################
+
+#the list csv file containing the top x ligands from the nnsearch step with ligand conformer shape similarity and accession data
+#example line: -0.492682218552,Z4448503755_1,01035,7
+placements_list_file=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/top_hits/lower/lower_res1_11_shifted_under_-16ddg.csv
+
+#the working location to prepare all test_params directories for discovery
+working_location=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/refined_conformers/lower_res1_11_shifted
+
+#OPTIONAL - string to activate conformator in the conformator container. Will be required after the license for the build in the container expires (should expire around August 29th 2026)
+#REMINDER, DON'T SHARE THE LICENSE OR PUT ON GITHUB
+#conformator_license_string=
+
+################################################
+#Program operations: Do not edit if yo udo not know what you are doing!
+################################################
+
+echo "Starting prepare test params controller job at $(date)"
+
+#operate the controller script to run shapedb for the target shape against all conformers in each subchunk with one job per chunk
+python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/discovery_test_params_preparation/prepare_refined_test_params_directories_from_placement_scores_list_controller.py $placements_list_file $working_location $top_ligands_list $conformator_license_string
+
+echo "All test params jobs submitted. Finished at $(date)"

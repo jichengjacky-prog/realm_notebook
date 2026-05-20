@@ -1,0 +1,37 @@
+#!/bin/bash
+#BSUB -J cleanup_master
+#BSUB -W 168:00        # 168 hours = 7 days
+#BSUB -n 1
+#BSUB -R "rusage[mem=4GB]"   # adjust if needed
+#BSUB -o cleanup_master.out
+#BSUB -e cleanup_master.err
+#BSUB -q long
+
+
+
+################################################
+#User inputs: Edit per run
+################################################
+
+#the ligand being used as a target for shapedb
+ligand=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/thymelab_pth2_discovery/pth2_structures/peptide_shapes/upper/upper_res29_34_shifted.mol2
+
+#the working location (if not wanting to run where this script is being called)
+working_location=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/initial_screening/upper/upper_res29_34_shifted
+
+#the number of ligand conformers you want to investigate for this target shape with Rosetta, likely want a few million
+num_confs_to_keep=3000000
+
+################################################
+#Program operations: Do not edit if yo udo not know what you are doing!
+################################################
+
+echo "Starting shapedb nn search controller job at $(date)"
+
+#operate the controller script to run shapedb for the target shape against all conformers in each subchunk with one job per chunk
+python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/shapedb/nnsearch_controller.py $ligand $working_location
+
+echo "All chunks processed for shapedb similarity. Finished at $(date)"
+
+#get the top x ligands based on shapedb similarty score for the target shape from all of the data
+python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/shapedb/get_top_x_ligands_in_whole_library_hpc.py $num_confs_to_keep $working_location

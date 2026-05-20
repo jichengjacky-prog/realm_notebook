@@ -1,0 +1,94 @@
+#!/bin/bash
+
+#BSUB -J cleanup_master
+
+#BSUB -W 720:00
+
+#BSUB -n 1
+
+#BSUB -R "rusage[mem=4GB]"
+
+#BSUB -o cleanup_master.out
+
+#BSUB -e cleanup_master.err
+
+#BSUB -q long
+
+
+
+################################################
+
+# User inputs: Edit per run
+
+################################################
+
+
+
+target_pdb=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/thymelab_pth2_discovery/pth2_structures/7F16_receptor_only.pdb
+
+anchor_residue_string="122,269"
+
+motifs_file=/pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs
+
+
+
+# Base root WITHOUT trailing number
+
+discovery_directory_base=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/top_hits/lower/lower_res1_11_shifted
+
+
+
+atr_cutoff=-2
+
+rep_cutoff=150
+
+ddg_cutoff=-9
+
+clobber=0
+
+
+
+extra_args_file=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/top_hits/lower/lower_res1_11_shifted/extra_args
+
+
+
+################################################
+
+# Program operations
+
+################################################
+
+
+
+echo "Starting Rosetta discovery controller job at $(date)"
+
+
+for i in $(seq 200 299); do
+
+
+    discovery_directory_root="${discovery_directory_base}/${i}"
+
+
+    echo "Running discovery for directory: ${discovery_directory_root}"
+
+
+    python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/run_ligand_discovery_search_controller.py \
+        $target_pdb \
+        $anchor_residue_string \
+        $motifs_file \
+        $discovery_directory_root \
+        $atr_cutoff \
+        $rep_cutoff \
+        $ddg_cutoff \
+        $clobber \
+        $extra_args_file
+
+
+
+done
+
+
+
+echo "All Rosetta discovery jobs submitted. Finished at $(date)"
+
+

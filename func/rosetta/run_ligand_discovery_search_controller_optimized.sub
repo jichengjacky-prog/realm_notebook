@@ -1,0 +1,45 @@
+#!/bin/bash
+#BSUB -J cleanup_master
+#BSUB -W 720:00        # 720 hours = 30 days
+#BSUB -n 1
+#BSUB -R "rusage[mem=4GB]"   # adjust if needed
+#BSUB -o cleanup_master.out
+#BSUB -e cleanup_master.err
+#BSUB -q long
+
+
+
+################################################
+#User inputs: Edit per run
+################################################
+
+#target pdb to dock ligands against
+target_pdb=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/thymelab_pth2_discovery/pth2_structures/7F16_receptor_only.pdb
+
+#comma-separated (no spaces) of all residue indices (in Rosetta format) intended to be considered for discovery
+anchor_residue_string="122,269"
+
+#motifs file for discovery, likely want to use /pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs unless there is another specific file you want to use
+motifs_file=/pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs
+
+#root directory to look for all test_params directories and run discovery for all given parameters
+discovery_directory_root=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/refined_conformers/lower_res1_11_shifted/
+
+#cutoffs (listed in order) for fa_atr, fa_rep, and ddg
+atr_cutoff=-2
+rep_cutoff=150
+ddg_cutoff=-9
+
+#[OPTIONAL, but recommended] path to file containing extra arguments for discovery for filters like the space fill analysis and real motif analysis, which are more complex groups of varaibles that should be custom filled out
+extra_args_file=/pi/summer.thyme-umw/rosetta_discovery_space/pth2/shapedb_results/top_hits/lower/lower_res1_11_shifted/extra_args
+
+################################################
+#Program operations: Do not edit if you do not know what you are doing!
+################################################
+
+echo "Starting Rosetta discovery controller job at $(date)"
+
+#operate the controller script to run shapedb for the target shape against all conformers in each subchunk with one job per chunk
+python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/chris_hull_optimizations/run_ligand_discovery_search_controller.py $target_pdb $anchor_residue_string $motifs_file $discovery_directory_root $atr_cutoff $rep_cutoff $ddg_cutoff  $extra_args_file
+
+echo "All Rosetta discovery jobs submitted. Finished at $(date)"
