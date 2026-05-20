@@ -94,17 +94,17 @@ for i in range(min_chunk,max_chunk + 1):
 			#create entry tuple
 			entry = (conf_score, conf_name, chunk_str, subchunk_str)
 
-			#keep adding entries until we are at the max to keep
+			# keep adding entries until we are at the max to keep
 			if len(conformer_heap) < max_ligands_to_keep:
 			    conformer_heap.append(entry)
-			    #once at the max, heapify
+			    # once at the max, heapify
 			    if len(conformer_heap) == max_ligands_to_keep:
 			        heapq.heapify(conformer_heap)
 			else:
 			    # heap[0] is the worst (smallest) score we are currently keeping
 			    if conf_score > conformer_heap[0][0]:
 			        heapq.heapreplace(conformer_heap, entry)
-
+			   
 		#close the file
 		read_file.close()
 	"""
