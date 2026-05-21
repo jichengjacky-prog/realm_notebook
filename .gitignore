@@ -1,3 +1,6 @@
 out/
 sif/
 input_pdb/
+*.ipynb_checkpoints/
+*_pycache_/
+

@@ -3,6 +3,21 @@ import argparse
 import heapq
 import os
 import sys
+import threading
+
+log_queue = None
+
+
+def init_worker(queue):
+    global log_queue
+    log_queue = queue
+
+
+def log(message):
+    if log_queue is not None:
+        log_queue.put(message)
+    else:
+        print(message, flush=True)
 
 
 def parse_args():
@@ -35,14 +50,14 @@ def process_chunk_range(max_ligands, shapedb_data_dir, start_chunk, end_chunk):
     heap = []
     for chunk in range(start_chunk, end_chunk + 1):
         superchunk_str, chunk_str = chunk_to_path(chunk)
-        print(f'Processing chunk {chunk_str} ({chunk})')
+        log(f'Processing chunk {chunk_str} ({chunk})')
 
         for subchunk in range(10):
             subchunk_str = str(subchunk)
             path = os.path.join(shapedb_data_dir, superchunk_str, chunk_str, f'{chunk_str}_{subchunk_str}_nn_filtered.txt')
 
             if not os.path.isfile(path):
-                print(f'  missing: {path}')
+                log(f'  missing: {path}')
                 continue
 
             try:
@@ -71,7 +86,7 @@ def process_chunk_range(max_ligands, shapedb_data_dir, start_chunk, end_chunk):
                             if conf_score > heap[0][0]:
                                 heapq.heapreplace(heap, entry)
             except Exception as exc:
-                print(f'  error reading {path}: {exc}')
+                log(f'  error reading {path}: {exc}')
 
     return heap
 
@@ -82,21 +97,19 @@ def process_superchunk(args):
     end_chunk = min(max_chunk, superchunk * 100 + 99)
     if start_chunk > end_chunk:
         return []
-    print(f'Worker starting superchunk {superchunk} (chunks {start_chunk}-{end_chunk})')
+    log(f'Worker starting superchunk {superchunk} (chunks {start_chunk}-{end_chunk})')
     return process_chunk_range(max_ligands, shapedb_data_dir, start_chunk, end_chunk)
 
 
-def combine_heaps(max_ligands, partial_heaps):
-    heap = []
-    for partial in partial_heaps:
-        for entry in partial:
-            if len(heap) < max_ligands:
-                heap.append(entry)
-                if len(heap) == max_ligands:
-                    heapq.heapify(heap)
-            else:
-                if entry[0] > heap[0][0]:
-                    heapq.heapreplace(heap, entry)
+def combine_heaps(max_ligands, heap, partial):
+    for entry in partial:
+        if len(heap) < max_ligands:
+            heap.append(entry)
+            if len(heap) == max_ligands:
+                heapq.heapify(heap)
+        else:
+            if entry[0] > heap[0][0]:
+                heapq.heapreplace(heap, entry)
     return heap
 
 
@@ -104,7 +117,7 @@ def process_chunks(max_ligands, shapedb_data_dir, min_chunk, max_chunk, workers=
     if workers <= 1:
         return process_chunk_range(max_ligands, shapedb_data_dir, min_chunk, max_chunk)
 
-    from multiprocessing import Pool
+    from multiprocessing import Pool, Queue
     superchunk_start = min_chunk // 100
     superchunk_end = max_chunk // 100
     superchunk_args = [
@@ -112,10 +125,34 @@ def process_chunks(max_ligands, shapedb_data_dir, min_chunk, max_chunk, workers=
         for sc in range(superchunk_start, superchunk_end + 1)
     ]
 
-    with Pool(processes=workers) as pool:
-        results = pool.map(process_superchunk, superchunk_args)
+    combined_heap = []
+    queue = Queue()
+    stop_event = threading.Event()
 
-    return combine_heaps(max_ligands, results)
+    def queue_listener(q, stop):
+        while True:
+            try:
+                message = q.get()
+            except (EOFError, OSError):
+                break
+            if message == '__DONE__':
+                break
+            print(message, flush=True)
+        stop.set()
+
+    listener = threading.Thread(target=queue_listener, args=(queue, stop_event), daemon=True)
+    listener.start()
+
+    with Pool(processes=workers, initializer=init_worker, initargs=(queue,)) as pool:
+        for partial in pool.imap_unordered(process_superchunk, superchunk_args):
+            print(f'Received partial heap with {len(partial)} entries', flush=True)
+            combined_heap = combine_heaps(max_ligands, combined_heap, partial)
+            print(f'Combined heap now has {len(combined_heap)} entries', flush=True)
+
+    queue.put('__DONE__')
+    listener.join()
+
+    return combined_heap
 
 
 def write_results(heap, shapedb_data_dir, output_dir, output_prefix, max_ligands, min_chunk, max_chunk):
