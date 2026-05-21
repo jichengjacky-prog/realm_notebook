@@ -3,33 +3,73 @@
 #this will create a test params directory (named test_params) for the ligand wherever this script is called
 
 #imports
-import os,sys
+import os
+import sys
+import argparse
+import subprocess
 
-#the smiles string of the placed ligand
-lig_smiles = sys.argv[1]
 
-#the name of the ligand
-lig_name = sys.argv[2]
+def parse_args():
+	parser = argparse.ArgumentParser(
+		description='Prepare conformer directory from SMILES string using Conformator'
+	)
+	parser.add_argument(
+		'smiles',
+		help='SMILES string of the ligand'
+	)
+	parser.add_argument(
+		'ligand_name',
+		help='Name of the ligand (used for file naming)'
+	)
+	parser.add_argument(
+		'--license-key',
+		default='',
+		help='Optional Conformator license key (if needed for container)'
+	)
+	parser.add_argument(
+	    'realm_location',
+		default='None',
+		help='Optional Conformator license key (if needed for container)'
+	)
+	return parser.parse_args()
 
-license_key = ""
 
-#optionally, include a license key string for conformator (which may be needed after the existing license for conformator in the container expires)
-if len(sys.argv) == 4:
-	license_key = sys.argv[3]
+def run_cmd(cmd):
+	result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+	if result.stdout:
+		print(result.stdout, end="")
+	if result.stderr:
+		print(result.stderr, file=sys.stderr, end="")
+	return result.returncode
+
+
+args = parse_args()
+lig_smiles = args.smiles
+lig_name = args.ligand_name
+license_key = args.license_key
+if args.realm_location != "None":
+	realm_location = args.realm_location
+else:
+	try:
+		realm_location = os.getcwd()
+	except Exception as e:
+		print(f"Error getting current working directory: {e}")
+		sys.exit(1)	
+	
 
 #no arguments needed since this is intended to operate in a preset directory
 #clobber an existing test_params directory if there is one
-os.system("rm -drf test_params")
+run_cmd("rm -drf test_params")
 
 #make initial test_params directory preparations
-os.system("mkdir -p test_params")
+run_cmd("mkdir -p test_params")
 
 
 #enter the directory
 os.chdir("test_params")
 
 #make necessary empty files that Rosetta needs to operate
-os.system("touch exclude_pdb_component_list.txt patches.txt")
+run_cmd("touch exclude_pdb_component_list.txt patches.txt")
 
 ##open write stream to write teh residue types file
 res_types_file = open("residue_types.txt", "w")
@@ -52,12 +92,18 @@ smiles_file.close()
 #run conformator out of the conformator container
 #determine whether to run command with or without using license activation
 if license_key != "":
-	os.system("singularity exec /pi/summer.thyme-umw/enamine-REAL-2.6billion/conformator_container.sif bash -lc \"/conformator_for_container/conformator_1.2.1/conformator --license \'" + license_key + "\' && /conformator_for_container/conformator_1.2.1/conformator -i " + lig_name + ".smi  -o " + lig_name + "_confs.sdf --keep3d --hydrogens -v 0\"")
+	cmd = ["singularity exec", "sif/conformator_container.sif", 
+		"bash", "-lc", 
+		"\"/conformator_for_container/conformator_1.2.1/conformator --license \'" + license_key + "\' && /conformator_for_container/conformator_1.2.1/conformator -i " + lig_name + ".smi  -o " + lig_name + "_confs.sdf --keep3d --hydrogens -v 0\""]
+	run_cmd(" ".join(cmd))
 else:
-	os.system("singularity exec /pi/summer.thyme-umw/enamine-REAL-2.6billion/conformator_container.sif /conformator_for_container/conformator_1.2.1/conformator -i " + lig_name + ".smi  -o " + lig_name + "_confs.sdf --keep3d --hydrogens -v 0")
-
+	cmd = ["singularity exec", "sif/conformator_container.sif", 
+		"bash", "-lc", 
+		"\"/conformator_for_container/conformator_1.2.1/conformator -i " + lig_name + ".smi  -o " + lig_name + "_confs.sdf --keep3d --hydrogens -v 0\""]
+	run_cmd(" ".join(cmd))
+	
 #use obabel to split the conformers file into individual conformer files
-os.system("obabel -isdf " + lig_name + "_confs.sdf -O " + lig_name + "_.sdf -m")
+run_cmd("obabel -isdf " + lig_name + "_confs.sdf -O " + lig_name + "_.sdf -m")
 
 #make a params file of each generated single params file
 for r,d,f in os.walk(os.getcwd()):
@@ -66,10 +112,11 @@ for r,d,f in os.walk(os.getcwd()):
 		if lig_name in file and file.endswith(".sdf") and file.endswith("_confs.sdf") == False:
 			#run molfile to params
 			#make a params file of the unique file
-			os.system("singularity exec /pi/summer.thyme-umw/enamine-REAL-2.6billion/conformator_container.sif python /conformator_for_container/molfile_to_params.py " + file + " -n " + file.split(".sdf")[0] + " --keep-names --long-names --clobber --no-pdb")
+			cmd = ["singularity exec", "sif/conformator_container.sif", "python", "/conformator_for_container/molfile_to_params.py", file, "-n", file.split(".sdf")[0], "--keep-names", "--long-names", "--clobber", "--no-pdb"]
+			run_cmd(" ".join(cmd))
 
 			#add the params to the residue_types list
 			res_types_file.write(file.split(".sdf")[0] + ".params\n")
 
 #cleanup by deleting sdf and smi files
-os.system("rm -drf *smi *sdf")
+run_cmd("rm -drf *smi *sdf")
