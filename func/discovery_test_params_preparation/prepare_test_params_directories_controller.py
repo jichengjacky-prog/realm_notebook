@@ -17,14 +17,59 @@
 
 
 #imports
-import os,sys
+import argparse
+import concurrent.futures
+import os
+import subprocess
+import sys
+
+
+def run_cmd(cmd, cwd=None):
+	result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+	if result.stdout:
+		print(result.stdout, end="")
+	if result.stderr:
+		print(result.stderr, file=sys.stderr, end="")
+	return result.returncode
+
+
+def submit_job(batch_dir, script_path):
+	cmd = f'bsub -q long -R "rusage[mem=1024]" -n 1 -W 8:00 -u "" "python {script_path}"'
+	return run_cmd(cmd, cwd=batch_dir)
+
+
+def increment_directory_indices(top_level, sub):
+	sub += 1
+	if sub == 100:
+		sub = 0
+		top_level += 1
+	return top_level, sub
+
+
+def create_batch_dir(base_dir, top_level, sub):
+	path = os.path.join(base_dir, str(top_level), str(sub))
+	os.makedirs(path, exist_ok=True)
+	return path
+
+
+# parse CLI arguments
+parser = argparse.ArgumentParser(
+	description="Create nested test_params directories in batches from a shapedb list."
+)
+parser.add_argument("working_location", help="Base directory for generated test_params directories")
+parser.add_argument("master_list", help="Path to the shapedb-style ligand conformer list file")
+parser.add_argument(
+	"--max-workers",
+	type=int,
+	default=4,
+	help="Number of threads used to submit jobs in parallel"
+)
+args = parser.parse_args()
 
 #get the working location and initial list file
-working_location = sys.argv[1]
-master_list = sys.argv[2]
-
-#move to the working location
-os.chdir(working_location)
+working_location = os.path.abspath(args.working_location)
+master_list = os.path.abspath(args.master_list)
+script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "prepare_test_params_directories_sub.py"))
 
 #declare counters for the top level directories and sub directories
 top_level_dirs = 0
@@ -33,85 +78,57 @@ sub_dirs = 0
 #declare a working list to hold batches of up to 100 ligands to make the lists and jobs
 small_confs_list = []
 
-#create a starting directory for the first directory to be made
-os.system("mkdir -p " + str(top_level_dirs))
-os.system("mkdir -p " + str(top_level_dirs) + "/" + str(sub_dirs))
+# job futures tracked for parallel submission
+futures = []
 
-#move to the created location
-os.chdir(str(top_level_dirs) + "/" + str(sub_dirs))
+with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+	batch_dir = create_batch_dir(working_location, top_level_dirs, sub_dirs)
+	conf_list_path = os.path.join(batch_dir, "conf_list.csv")
+	write_file = open(conf_list_path, "w")
 
-#create a file to write the small list to
-write_file = open("conf_list.csv", "w")
+	with open(master_list, "r") as master_list_file:
+		for line in master_list_file:
+			line = line.rstrip("\n")
+			if not line:
+				continue
 
-#read through the master list, collect conformers, and make test_params directories every 100 encountered (or when at the end)
-master_list_file = open(master_list,"r")
-for line in master_list_file.readlines():
-	#extract the ligand with conformer to ensure it is not in the working small_confs list
-	ligconf = line.split(",")[1]
-	#continue to avoid repeating, although this should generally be impossible. having the same ligand in the same call to rosetta twice could break things
-	if ligconf in small_confs_list:
-		print("WARNING: Encountered repeat of ligand conformer of " + ligconf)
-		continue
+			#extract the ligand with conformer to ensure it is not in the working small_confs list
+			fields = line.split(",")
+			if len(fields) < 2:
+				print(f"WARNING: malformed line skipped: {line}")
+				continue
+			ligconf = fields[1]
 
-	#assuming we can move forward with the ligand, add it to the small confs list and write it to the write file
-	write_file.write(line)
+			#continue to avoid repeating, although this should generally be impossible. having the same ligand in the same call to rosetta twice could break things
+			if ligconf in small_confs_list:
+				print("WARNING: Encountered repeat of ligand conformer of " + ligconf)
+				continue
 
-	small_confs_list.append(ligconf)
+			#assuming we can move forward with the ligand, add it to the small confs list and write it to the write file
+			write_file.write(line + "\n")
+			small_confs_list.append(ligconf)
 
-	#if the size of teh small confs list reaches 100, prepare the run the sub script on this directory and then move on to the next
-	if len(small_confs_list) == 100:
-		#close the write stream
-		write_file.close()
+			#if the size of the small confs list reaches 100, prepare the run the sub script on this directory and then move on to the next
+			if len(small_confs_list) == 100:
+				write_file.close()
+				futures.append(executor.submit(submit_job, batch_dir, script_path))
+				small_confs_list = []
 
-		#reset the small confs list
-		small_confs_list = []
+				#increment directories for the next batch
+				top_level_dirs, sub_dirs = increment_directory_indices(top_level_dirs, sub_dirs)
+				batch_dir = create_batch_dir(working_location, top_level_dirs, sub_dirs)
+				conf_list_path = os.path.join(batch_dir, "conf_list.csv")
+				write_file = open(conf_list_path, "w")
 
-		#fire off a job to process the concluding batch
-		#os.system("bsub -q long -W 8:00 -u \"\" \"python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/shapedb/run_nnsearch_hpc.py " + chunk_str + " " +  target_molecule_file + " " + working_location + " \"")
-		os.system("bsub -q long -W 8:00 -u \"\" \"python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/discovery_test_params_preparation/prepare_test_params_directories_sub.py\"")
+	#end behavior for final list
+	write_file.close()
+	if small_confs_list:
+		futures.append(executor.submit(submit_job, batch_dir, script_path))
 
-		#throttle progress if there are too many job in queue
-		#bsub job throttle to make sure we do not exceed our local limit
-		#write the length of the bjobs queue to this current location
-		os.system("bjobs | wc -l > bjobs_length.txt")
-		job_count = 0
-		with open("bjobs_length.txt") as f:
-			job_count = int(f.read().strip())
-		while job_count > 1500:
-			#sleep for 1 second to not overburden the system
-			os.system("sleep 1")
-			os.system("bjobs | wc -l > bjobs_length.txt")
-			with open("bjobs_length.txt") as f:
-				job_count = int(f.read().strip())
-		#remove the length file to avoid clutter
-		os.system("rm bjobs_length.txt")		
+	# wait for all submissions to complete
+	for future in concurrent.futures.as_completed(futures):
+		exit_code = future.result()
+		if exit_code != 0:
+			print(f"Job submission failed with exit code {exit_code}", file=sys.stderr)
 
-		#move back to the top and make a new directory set and write file
-		#move to the working location
-		os.chdir(working_location)
-
-		#increment the lower directory and work from there
-		sub_dirs = sub_dirs + 1
-
-		#behavior for if we make 100 subdirs
-		if sub_dirs == 100:
-			sub_dirs = 0
-			top_level_dirs = top_level_dirs + 1
-
-		#reset the small list, make directories, and make the next small list file
-		#create a starting directory for the first directory to be made
-		os.system("mkdir -p " + str(top_level_dirs))
-		os.system("mkdir -p " + str(top_level_dirs) + "/" + str(sub_dirs))
-
-		#move to the created location
-		os.chdir(str(top_level_dirs) + "/" + str(sub_dirs))
-
-		#create a file to write the small list to
-		write_file = open("conf_list.csv", "w")		
-
-#end behavior for final list
-#close the final file
-write_file.close()
-
-#submit the final job
-os.system("bsub -q long -W 8:00 -u \"\" \"python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/discovery_test_params_preparation/prepare_test_params_directories_sub.py\"")
+print(f"Submitted {len(futures)} batch jobs with up to {args.max_workers} concurrent workers.")

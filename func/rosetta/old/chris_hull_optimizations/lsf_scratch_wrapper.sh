@@ -99,5 +99,5 @@ printf '  [%s]\n' "$@"
 #echo "$@"
 
 export SCRATCH_DIR
-python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/chris_hull_optimizations/run_ligand_discovery_search.py "$@"
+python ./func/rosetta/chris_hull_optimizations/run_ligand_discovery_search.py "$@"
 

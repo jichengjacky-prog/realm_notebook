@@ -20,34 +20,74 @@
 #singularity exec --bind test_params:/input/test_params --bind test_args:/input/test_args --bind /pi/summer.thyme-umw/rosetta_discovery_space/pth2/thymelab_pth2_discovery/pth2_structures/7F16_receptor_only.pdb:/input/7F16_receptor_only.pdb --bind /pi/summer.thyme-umw/2024_intern_lab_space/FINAL_motifs_list_filtered_2_3_2023.motifs:/input/FINAL_motifs_list_filtered_2_3_2023.motifs /pi/summer.thyme-umw/2024_intern_lab_space/ari_work/containers/rosetta_condensed_6_25_2024.sif /rosetta/source/bin/ligand_discovery_search_protocol.linuxgccrelease @/input/test_args
 
 #imports
-import os,sys
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-#take in arguments
-#target pdb
-target_pdb = sys.argv[1]
-#anchor residue(s)
-anchor_residue_string = sys.argv[2]
-#motifs file (likely want /pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs unless you know what you are doing)
-motifs_file = sys.argv[3]
-#test_params directory (needs to end with a /, also needs to be explicitly named "test_params" due to how functions in Rosetta work)
-test_params_dir = sys.argv[4]
+def run_cmd(cmd):
+	result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+	if result.stdout:
+		print(result.stdout, end="")
+	if result.stderr:
+		print(result.stderr, file=sys.stderr, end="")
+	return result.returncode
+
+# parse CLI arguments
+parser = argparse.ArgumentParser(
+	description="Run Rosetta ligand discovery search for a single test_params directory."
+)
+parser.add_argument("target_pdb", help="Target PDB file path")
+parser.add_argument(
+	"anchor_residue_string",
+	help="Comma-separated Rosetta-indexed anchor residue(s), e.g. 79 or 11,79,55,403"
+)
+parser.add_argument("motifs_file", help="Motifs file path")
+parser.add_argument(
+	"test_params_dir",
+	help="Path to the test_params directory",
+)
+parser.add_argument(
+	"discovery_directory_root",
+	help="Root directory to search for test_params directories"
+)
+
+parser.add_argument("atr", help="fa_atr cutoff")
+parser.add_argument("rep", help="fa_rep cutoff")
+parser.add_argument("ddg", help="ddg cutoff")
+parser.add_argument(
+	"--extra-args-file",
+	dest="extra_args_file",
+	default="",
+	help="Optional file with additional Rosetta discovery arguments"
+)
+args = parser.parse_args()
+
+# target pdb
+target_pdb = args.target_pdb
+# anchor residue(s)
+anchor_residue_string = args.anchor_residue_string
+# motifs file (likely want /pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs unless you know what you are doing)
+motifs_file = args.motifs_file
+# test_params directory (needs to end with a /, also needs to be explicitly named "test_params" due to how functions in Rosetta work)
+test_params_dir = args.test_params_dir
+discovery_directory_root = args.discovery_directory_root
 if test_params_dir.endswith("/") == False:
 	test_params_dir = test_params_dir + "/"
-#atr, rep, ddg cutoffs
-atr = sys.argv[5]
-rep = sys.argv[6]
-ddg = sys.argv[7]
+# atr, rep, ddg cutoffs
+atr = args.atr
+rep = args.rep
+ddg = args.ddg
 
-#if there is an extra args file, take it in
-extra_args_file = ""
-if len(sys.argv) >= 9:
-	extra_args_file = sys.argv[8]
+# if there is an extra args file, take it in
+extra_args_file = args.extra_args_file
 
 #for the input files/directories, they need to be mapped to a container location for the Rosetta container (by default, will map to the /input location for the singularity call)
 #here we will make strings for the mapping, which will go in the rosetta args file (the actual paths will be used in executing in the singularity image)
-input_target_pdb = "/input/" + target_pdb.split("/")[len(target_pdb.split("/")) - 1]
-input_motifs_file = "/input/" + motifs_file.split("/")[len(motifs_file.split("/")) - 1]
-input_test_params_dir = "/input/test_params/"
+#input_target_pdb = "/input/" + target_pdb.split("/")[len(target_pdb.split("/")) - 1]
+#input_motifs_file = "/input/" + motifs_file.split("/")[len(motifs_file.split("/")) - 1]
+#input_test_params_dir = "/input/test_params/"
 #at least for now, if there are other input files that are added in the extra args, they can't be supported unless I improve the mapping logic in the call to rosetta executaion in the container (since files would have to be recognized and mapped)
 
 #now that we have all the args, compose an args file for discovery in the location where this is called
@@ -68,11 +108,11 @@ args_file.write("-best_pdbs_to_keep 0\n")
 
 #user input dependent
 args_file.write("#mapped protein system\n")
-args_file.write("-s " + input_target_pdb + "\n")
+args_file.write("-s " + "/input/" + str(Path(target_pdb).name) + "\n")
 args_file.write("#mapped motifs file\n")
-args_file.write("-motif_filename " + input_motifs_file + "\n")
+args_file.write("-motif_filename " + "/input/" + str(Path(motifs_file).name) + "\n")
 args_file.write("#mapped test_params directory\n")
-args_file.write("-params_directory_path " + input_test_params_dir + "\n")
+args_file.write("-params_directory_path " + "/input/" + str(Path(test_params_dir).name) +"/" "\n")
 args_file.write("#rosetta-indexed anchor residue index/indices\n")
 args_file.write("-protein_discovery_locus " + anchor_residue_string + "\n")
 args_file.write("#fa_atr cutoff\n")
@@ -94,13 +134,23 @@ if extra_args_file != "":
 
 args_file.close()
 
+print(test_params_dir)
+
+rosetta_cmd =[ "singularity exec " ,
+		"--bind " + test_params_dir +":" + "/input/test_params/" ,
+		" --bind " + os.getcwd() + "/args:/input/args" ,
+		" --bind " + target_pdb + ":" + "/input/" + str(Path(target_pdb).name) ,
+		" --bind " + motifs_file + ":" + "/input/" + str(Path(motifs_file).name),
+		discovery_directory_root + "/sif/rosetta_condensed_6_25_2024.sif",
+		"/rosetta/source/bin/ligand_discovery_search_protocol.linuxgccrelease @/input/args"]
+
+
 #we now have the args file written, now call Rosetta discovery
-os.system("singularity exec --bind " + test_params_dir + ":" + input_test_params_dir + " --bind " + os.getcwd() + "/args:/input/args --bind " + target_pdb + ":" + input_target_pdb + " --bind " + motifs_file + ":" + input_motifs_file + " /pi/summer.thyme-umw/enamine-REAL-2.6billion/rosetta_condensed_6_25_2024.sif /rosetta/source/bin/ligand_discovery_search_protocol.linuxgccrelease @/input/args")
-
+run_cmd(' '.join(rosetta_cmd))
 #move all pdb files to a placements directory
-os.system("mkdir placements")
+run_cmd("mkdir placements")
 
-os.system("mv *pdb placements")
+run_cmd("mv *pdb placements")
 
 os.chdir("placements")
 
@@ -111,17 +161,17 @@ for r,d,f in os.walk(os.getcwd()):
 			os.system("mv " + file + " res" + anchor_residue_string + "_" + file)
 
 #now, call the placement analysis script
-os.system("python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/score_placed_ligands_with_filtering.py")
+run_cmd("python " + discovery_directory_root + "/func/rosetta/score_placed_ligands_with_filtering.py")
 
 #copy the csv files up a level for easy accession outside of the to-be compressed placements directory
-os.system("cp *csv ..")
+run_cmd("cp *csv ..")
 
 #then, compress the placement files (this will move all pdb files to a directory called placements, so do not keep any important pdbs in here)
 os.chdir("..")
 
-os.system("tar -czf placements.tar.gz placements")
+run_cmd("tar -czf placements.tar.gz placements")
 
-os.system("rm -drf placements")
+run_cmd("rm -drf placements")
 
 #run the dehydrate script to minimize overhead (until it is time to process the discovery results)
-os.system("python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/tidying/shrink_placement_pdbs_to_placement_and_surrounding_residues.py " + target_pdb)
+run_cmd("python " + discovery_directory_root + "/func/tidying/shrink_placement_pdbs_to_placement_and_surrounding_residues.py " + target_pdb)

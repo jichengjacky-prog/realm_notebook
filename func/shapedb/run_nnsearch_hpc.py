@@ -62,6 +62,7 @@ run_cmd("rm -drf " + working_chunk)
 run_cmd("mkdir -p " + working_chunk)
 os.chdir(working_chunk)
 
+i=0
 try:
 	#iteratively decompress the params and db data to the working chunk location
 	for i in range (0,10):

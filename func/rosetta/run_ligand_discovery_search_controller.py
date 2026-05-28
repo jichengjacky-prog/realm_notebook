@@ -15,39 +15,87 @@
 #by default, this script will try to run individual jobs for up to 7 days. if this really needs to be changed, I can make an option or something, but jobs shouldn't be running for that long anyway
 
 #imports
-import os,sys
+import argparse
+import os
+import subprocess
+import sys
 
-#take in arguments
-#target pdb
-target_pdb = sys.argv[1]
-#anchor residue(s)
-anchor_residue_string = sys.argv[2]
 
-#break apart the string by commas into a list
+def run_cmd(cmd):
+	result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+	if result.stdout:
+		print(result.stdout, end="")
+	if result.stderr:
+		print(result.stderr, file=sys.stderr, end="")
+	return result.returncode
+
+# parse CLI arguments
+parser = argparse.ArgumentParser(
+	description="Run Rosetta ligand discovery search across a tree of test_params directories."
+)
+parser.add_argument("target_pdb", help="Target PDB file path")
+parser.add_argument(
+	"anchor_residue_string",
+	help="Comma-separated anchor residue indices (Rosetta indexing), e.g. 79 or 11,79,55,403"
+)
+parser.add_argument("motifs_file", help="Motifs file path")
+parser.add_argument(
+	"discovery_directory_root",
+	help="Root directory to search for test_params directories"
+)
+parser.add_argument(
+	"shapedb_output_dir",
+	help="Directory to store shapedb output"
+)
+parser.add_argument("atr", help="fa_atr cutoff")
+parser.add_argument("rep", help="fa_rep cutoff")
+parser.add_argument("ddg", help="ddg cutoff")
+def str2bool(v):
+	if isinstance(v, bool):
+		return v
+	if v.lower() in ('yes', 'true', 't', '1'):
+		return True
+	elif v.lower() in ('no','false', 'f', '0'):
+		return False
+	else:
+		raise argparse.ArgumentTypeError('Boolean value expected.')
+
+parser.add_argument(
+	"clobber",
+	type=str2bool,
+	help="True/False or 1/0 to clobber existing completed discovery directories"
+)
+parser.add_argument(
+	"--extra-args-file",
+	dest="extra_args_file",
+	default="",
+	help="Optional file containing additional Rosetta discovery arguments"
+)
+args = parser.parse_args()
+
+# target pdb
+target_pdb = args.target_pdb
+# anchor residue(s)
+anchor_residue_string = args.anchor_residue_string
+# break apart the string by commas into a list
 anchor_residue_string_list = anchor_residue_string.split(",")
-
-#motifs file (likely want /pi/summer.thyme-umw/enamine-REAL-2.6billion/FINAL_motifs_list_filtered_2_3_2023.motifs unless you know what you are doing)
-motifs_file = sys.argv[3]
-
-#discovery directory root, will look down from here for all test params directories and attempt discovery for each anchor residue at the same level as each test_params directory
-discovery_directory_root = sys.argv[4]
-
-#atr, rep, ddg cutoffs
-atr = sys.argv[5]
-rep = sys.argv[6]
-ddg = sys.argv[7]
-
-#determine whether to clobber existing COMPLETE discovery directories (set as binary 1-true and do clobber or 0-false and do not clobber)
-#complete is defined by a directory having a compressed placements directory (placements.tar.gz) and raw scores directory (raw_scores.csv)
-clobber = int(sys.argv[8])
-
-#if there is an extra args file, take it in, so we can pass it down to all discovery jobs
-extra_args_file = ""
-if len(sys.argv) >= 10:
-	extra_args_file = sys.argv[9]
+# motifs file
+motifs_file = args.motifs_file
+# discovery directory root
+discovery_directory_root = args.discovery_directory_root
+# shapedb output directory
+shapedb_output_dir = args.shapedb_output_dir
+# atr, rep, ddg cutoffs
+atr = args.atr
+rep = args.rep
+ddg = args.ddg
+# clobber existing output directories
+clobber = args.clobber
+# optional extra args file
+extra_args_file = args.extra_args_file
 
 #look over the discovery directory root to identify test_params directories
-for r,d,f in os.walk(discovery_directory_root):
+for r,d,f in os.walk(shapedb_output_dir):
 	for dire in d:
 		#only look at the test_params directories
 		if dire == "test_params":
@@ -61,7 +109,7 @@ for r,d,f in os.walk(discovery_directory_root):
 				os.chdir(tp_root)
 
 				#determine whether there was a completed run that we do not want to clobber and avoid it
-				if clobber == 0:
+				if clobber:
 					#check the directory for if there is a placements.tar.gz file and a raw_scores.csv file. if there are both, do not clobber and simply continue
 					has_placements_tar = False
 					has_raw_scores = False
@@ -78,10 +126,10 @@ for r,d,f in os.walk(discovery_directory_root):
 
 
 				#clobber the existing directory for a fresh run
-				os.system("rm -drf " + str(residue))
+				run_cmd("rm -drf " + str(residue))
 
 				#make a directory for the anchor residue
-				os.system("mkdir -p " + str(residue))
+				run_cmd("mkdir -p " + str(residue))
 
 				#enter the directory
 				os.chdir(str(residue))
@@ -90,82 +138,26 @@ for r,d,f in os.walk(discovery_directory_root):
 				#if there are under 1600 long jobs, send to long
 				#else if there are under 900 large jobs, send to large
 				#otherwise if both buffered queues are running and full, throttle until space opens up
-
-				#initialize
-				queue = "None"
-
-				#add a throttle at 1600 parallel jobs to avoid overflowing the system (1600 so extra jobs can be queued outside of the 1500 allowed to run)
-				#bsub job throttle to make sure we do not exceed our local limit
-				#write the length of the bjobs queue to this current location
-				os.system("bjobs | awk '{print $4}' | grep long | wc -l > bjobs_long_length.txt")
-				os.system("bjobs | awk '{print $4}' | grep large | wc -l > bjobs_large_length.txt")
-				long_job_count = 0
-				large_job_count = 0
-				with open("bjobs_long_length.txt") as f:
-					long_job_count = int(f.read().strip())
-				with open("bjobs_large_length.txt") as f:
-					large_job_count = int(f.read().strip())
-
-				#queue assignment
-				if long_job_count < 1600:
-					queue = "long"
-
-				#changing from 900 to -1 so we don't try to use the large queue anymore
-				if long_job_count > 1600 and large_job_count < -1:
-					queue = "large"
-
-
-				#hit the throttle if both queues are stuffed
-				#while long_job_count > 1600 and large_job_count > 900 and queue == "None":
-				while True:
-					
-					os.system("bjobs | awk '{print $4}' | grep long | wc -l > bjobs_long_length.txt")
-					os.system("bjobs | awk '{print $4}' | grep large | wc -l > bjobs_large_length.txt")
-					long_job_count = 0
-					large_job_count = 0
-					with open("bjobs_long_length.txt") as f:
-						long_job_count = int(f.read().strip())
-					with open("bjobs_large_length.txt") as f:
-						large_job_count = int(f.read().strip())
-
-					#queue assignment
-					if long_job_count < 1600:
-						queue = "long"
-						break
-
-					#changing from 900 to -1 so we don't try to use the large queue anymore
-					elif large_job_count < -1:
-						queue = "large"
-						break
-
-					#sleep for 1 second to not overburden the system
-					os.system("sleep 1")
-
-				#remove the length file to avoid clutter
-				os.system("rm bjobs_long_length.txt bjobs_large_length.txt")				
+				os.system("sleep 0.5")
 
 				#prepare to run discovery on test params for this residue
 				#start the command
-				#cmd = "bsub -q long -W 168:00 -u \"\" -o output -e error -R \"rusage[mem=8000]\" \"python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/run_ligand_discovery_search.py "
 				#removing the output and error std out
-				cmd = "bsub -q " + queue + " -W 96:00 -u \"\" -R \"rusage[mem=10000]\" \"python /pi/summer.thyme-umw/enamine-REAL-2.6billion/umass_chan_REAL-M_platform/rosetta/run_ligand_discovery_search.py "
-				#target pdb
-				cmd = cmd + target_pdb + " "
-				#anchor residue
-				cmd = cmd + str(residue) + " "
-				#motifs file
-				cmd = cmd + motifs_file + " "
-				#test_params directory
-				cmd = cmd + tp_root + "/test_params/ "
-				#atr cutoff, rep cutoff, ddg cutoff
-				cmd = cmd + str(atr) + " " + str(rep) + " " + ddg + " "
-				#extra args file (if any, and if not will append a blank string)
-				cmd = cmd + extra_args_file
-				#cap off
-				cmd = cmd + "\""
+				cmd = ["bsub -q long -W 96:0 -n 1 -U \"\" -R \"rusage[mem=10000]\"", 
+		   			"python", discovery_directory_root +"/func/rosetta/run_ligand_discovery_search.py",
+				target_pdb,
+				str(residue),
+			   	motifs_file,
+			   	tp_root + "/test_params/",
+				discovery_directory_root,
+			  	atr,
+			   	rep,
+			   	ddg,
+			   	extra_args_file]
+				
 
-				print(cmd)
-				os.system(cmd)
+				print(' '.join(cmd))
+				run_cmd(' '.join(cmd))
 
 				
 
