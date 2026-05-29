@@ -79,6 +79,12 @@ def write_results(heap, working_location, max_ligands, min_chunk, max_chunk):
 def submit_chunk_job(chunk, target_molecule_file, working_location, realm_location):
 	"""Submit a bsub job for a single chunk. Returns the LSF job ID."""
 	chunk_str = str(chunk).zfill(5)
+	superchunk_str, _ = chunk_to_path(chunk)
+
+	# ensure the chunk directory exists before submitting the job
+	chunk_dir = os.path.join(working_location, superchunk_str, chunk_str)
+	os.makedirs(chunk_dir, exist_ok=True)
+
 	queue_cmd = [
 		f'bsub -q "long short" -n 1 -W 1:00 -u "" -R "rusage[mem=6000]"',
 		"python",
@@ -141,7 +147,7 @@ def process_finished_chunk(chunk, max_ligands, combined_heap, working_location,
 	chunk_dir = os.path.join(working_location, superchunk_str, chunk_str)
 	if os.path.isdir(chunk_dir):
 		print(f'Deleting chunk directory: {chunk_dir}')
-		shutil.rmtree(chunk_dir)
+		shutil.rmtree(chunk_dir, ignore_errors=True)
 
 	# delete the superchunk directory once all its jobs are done
 	superchunk_remaining[superchunk_str] -= 1

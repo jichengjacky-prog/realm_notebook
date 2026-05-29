@@ -3,4 +3,4 @@ sif/
 input_pdb/
 *.ipynb_checkpoints/
 *_pycache_/
-
+motifs/
