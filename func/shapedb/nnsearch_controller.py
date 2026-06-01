@@ -76,6 +76,25 @@ def write_results(heap, working_location, max_ligands, min_chunk, max_chunk):
 	return output_file
 
 
+def save_heap_checkpoint(heap, working_location, last_chunk):
+	"""Save the current heap to a checkpoint file after each chunk merge.
+	This protects against data loss if the controller is interrupted."""
+	checkpoint_dir = os.path.join(working_location, 'combined_results')
+	os.makedirs(checkpoint_dir, exist_ok=True)
+	checkpoint_file = os.path.join(checkpoint_dir, 'heap_checkpoint.txt')
+	tmp_file = checkpoint_file + '.tmp'
+
+	# sort descending so the best ligands are at the top when inspecting manually
+	sorted_results = sorted(heap, reverse=True)
+	with open(tmp_file, 'w') as fh:
+		fh.write(f'# last_merged_chunk={str(last_chunk).zfill(5)} heap_size={len(sorted_results)}\n')
+		for conf_score, conf_name, chunk_str, subchunk_str in sorted_results:
+			fh.write(f'{conf_score},{conf_name},{chunk_str},{subchunk_str}\n')
+
+	os.replace(tmp_file, checkpoint_file)  # atomic rename
+	print(f'Checkpoint saved: {len(sorted_results)} entries to {checkpoint_file}')
+
+
 def submit_chunk_job(chunk, target_molecule_file, working_location, realm_location):
 	"""Submit a bsub job for a single chunk. Returns the LSF job ID."""
 	chunk_str = str(chunk).zfill(5)
@@ -141,6 +160,7 @@ def process_finished_chunk(chunk, max_ligands, combined_heap, working_location,
 	print(f'Loading chunk {chunk_str} results into heap...')
 	load_chunk_into_heap(max_ligands, combined_heap, working_location, chunk)
 	print(f'Heap now has {len(combined_heap)} entries')
+	save_heap_checkpoint(combined_heap, working_location, chunk)
 
 	# delete the chunk directory to free disk space
 	superchunk_str, _ = chunk_to_path(chunk)
@@ -183,8 +203,8 @@ def parse_args():
 	)
 	parser.add_argument(
 		'-n', '--max-ligands',
-		type=int, default=1000,
-		help='Number of top ligands to keep (default: 1000)'
+		type=int, default=100000,
+		help='Number of top ligands to keep (default: 100000)'
 	)
 	parser.add_argument(
 		'-j', '--workers',
