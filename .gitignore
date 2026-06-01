@@ -1,6 +1,6 @@
-out/
-sif/
-input_pdb/
+out/*
+sif/*
+input_pdb/*
 *.ipynb_checkpoints/
-*_pycache_/
-motifs/
+__pycache__/
+motifs/*
