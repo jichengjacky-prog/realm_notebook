@@ -59,7 +59,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("working_location", help="Base directory for generated test_params directories")
 parser.add_argument("master_list", help="Path to the shapedb-style ligand conformer list file")
 parser.add_argument(
-	"--max-workers",
+	"--workers",
 	type=int,
 	default=4,
 	help="Number of threads used to submit jobs in parallel"
@@ -81,7 +81,7 @@ small_confs_list = []
 # job futures tracked for parallel submission
 futures = []
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
 	batch_dir = create_batch_dir(working_location, top_level_dirs, sub_dirs)
 	conf_list_path = os.path.join(batch_dir, "conf_list.csv")
 	write_file = open(conf_list_path, "w")

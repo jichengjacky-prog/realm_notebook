@@ -4,3 +4,5 @@ input_pdb/*
 *.ipynb_checkpoints/
 __pycache__/
 motifs/*
+tmp/*
+license/*
