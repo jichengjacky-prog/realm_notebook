@@ -327,9 +327,12 @@ def run_rosetta_discovery(test_params_dir, target_pdb, anchor_residues,
 		
 		rosetta_script = os.path.join(discovery_root, "func", "discovery", "run_ligand_discovery_search.py")
 		extra_flag = f"--extra-args-file {extra_params}" if extra_params else ""
-		# Build Rosetta command
+		# Build Rosetta command with stdout/stderr redirected to files
+		stdout_file = os.path.join(residue_dir, f"{residue}_rosetta.out")
+		stderr_file = os.path.join(residue_dir, f"{residue}_rosetta.err")
 		job_cmd = (
-			f"bsub -q long -W 96:00 -n 8 -R \"rusage[mem=10000]\" "
+			f"bsub -q long -W 12:00 -n 8 -u \"\" -R \"rusage[mem=1000]\" "
+			f"-o {stdout_file} -e {stderr_file} "
 			f"\"python {rosetta_script} {target_pdb} {residue} {motifs_file} "
 			f"{test_params_dir} {discovery_root} {atr} {rep} {ddg} {extra_flag}\""
 		)
@@ -359,18 +362,34 @@ def run_rosetta_discovery(test_params_dir, target_pdb, anchor_residues,
 		print("ERROR: No jobs were submitted")
 		return False
 	
-	# Wait for all jobs to finish (ended = done or exited, regardless of status)
-	print(f"Waiting for {len(job_ids)} job(s) to complete: {', '.join(job_ids)}")
-	ended_conditions = " && ".join(f"ended({jid})" for jid in job_ids)
-	wait_cmd = f"bwait -w '{ended_conditions}'"
-	wait_result = subprocess.run(wait_cmd, shell=True, capture_output=True, text=True)
-	if wait_result.returncode != 0:
-		print(f"WARNING: bwait returned non-zero (some jobs may have failed)")
+		# Poll for all jobs to finish with a 60-second interval
+	import time
+	pending = set(job_ids)
+	poll_interval = 60
+	print(f"Waiting for {len(pending)} job(s) to complete (polling every {poll_interval}s)...")
+	while pending:
+		time.sleep(poll_interval)
+		still_pending = set()
+		for jid in sorted(pending):
+			check_cmd = f"bjobs -o 'stat' -noheader {jid} 2>/dev/null"
+			check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+			status = check_result.stdout.strip()
+			if not status:
+				# Job no longer tracked by LSF — treat as done
+				print(f"  Job {jid}: no longer tracked (presumed done)")
+				continue
+			if "DONE" in status or "EXIT" in status:
+				print(f"  Job {jid}: {status}")
+				continue
+			# Still running or pending
+			still_pending.add(jid)
+		pending = still_pending
+		if pending:
+			print(f"  Still waiting for {len(pending)} job(s): {', '.join(sorted(pending))}")
 	
 	# Check exit status of each job
 	all_success = True
 	for job_id in job_ids:
-		# bjobs -o 'stat exit_code' -noheader <job_id>
 		check_cmd = f"bjobs -o 'stat exit_code' -noheader {job_id} 2>/dev/null"
 		check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
 		status_line = check_result.stdout.strip()
@@ -477,7 +496,7 @@ def process_batch(batch_list, target_pdb, anchor_residues, motifs_file,
 	print(f"\n=== Processing batch {batch_id} ({len(batch_list)} ligands) ===")
 	
 	# Work directly in tmp_root — no batch subdirectories
-	batch_dir = Path(tmp_root) / f"batch_{batch_id}" if tmp_root else  f"batch_{batch_id}"
+	batch_dir = Path(tmp_root) / f"batch_{batch_id:05d}" if tmp_root else  f"batch_{batch_id:05d}"
 	os.makedirs(batch_dir, exist_ok=True)
 	
 	try:
@@ -583,7 +602,7 @@ def main():
 					   help="Path to Enamine library")
 	parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
 	parser.add_argument("--max-ligands", type=int, default=1000, help="Max ligands to keep")
-	parser.add_argument("--batch-size", type=int, default=100, help="Ligands per batch")
+	parser.add_argument("--batch-size", type=int, default=10, help="Ligands per batch")
 	parser.add_argument("--top-hits", type=int, default=0,
 					   help="Only process top N hits from the shapedb list (0 = process all)")
 	parser.add_argument("--num-conformers", type=int, default=150, 
