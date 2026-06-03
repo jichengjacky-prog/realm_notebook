@@ -34,13 +34,15 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
 # ── CDPKit imports ──────────────────────────────────────────────────────────
 try:
-    import CDPL.chem as Chem
+    import CDPL
+    import CDPL.Chem as Chem
     import CDPL.ConfGen as ConfGen
     CDPKIT_AVAILABLE = True
-except ImportError:
+    print("CDPKit is available.")
+except Exception:
+    # ImportError or linter/static analysis resolution failures
     CDPKIT_AVAILABLE = False
     Chem = None
     ConfGen = None
@@ -211,18 +213,18 @@ def _build_mol_from_params(atoms_info, bond_list):
 def _build_mol_cdpkit(atoms_info, bond_list):
     """Build a CDPKit molecule and return SMILES, or None."""
     try:
-        from cdpkit import Chem
-        mol = Chem.Molecule()
+        import CDPL.Chem as CDPL_Chem
+        mol = CDPL_Chem.BasicMolecule()
         atom_map = {}
         for atom_name, elem in atoms_info:
-            idx = mol.addAtom(elem)
-            atom_map[atom_name] = idx
+            atom = mol.addAtom()
+            CDPL_Chem.setSymbol(atom, elem)
+            atom_map[atom_name] = atom.getIndex()
         for a1, a2, order in bond_list:
             if a1 in atom_map and a2 in atom_map:
-                bt = {1: 1, 2: 2, 3: 3, 4: 4}.get(int(order), 1)  # CDPKit uses ints
-                # CDPKit bond type setting depends on API version
+                bt = int(order)
                 mol.addBond(atom_map[a1], atom_map[a2], bt)
-        return Chem.generateSMILES(mol)
+        return CDPL_Chem.generateSMILES(mol)
     except Exception as e:
         print(f"    CDPKit molecule build failed: {e}")
         return None
@@ -469,18 +471,30 @@ def generate_cdpkit_conformers(smiles, num_conformers=150):
             return []
 
         # Add hydrogens for Rosetta compatibility
-        Chem.addHydrogens(mol)
+        Chem.makeHydrogenComplete(mol)
 
-        # Generate conformers
+        # Perceive molecular properties required for conformer generation
+        Chem.perceiveHybridizationStates(mol, True)
+        Chem.calcImplicitHydrogenCounts(mol, True)
+        ConfGen.prepareForConformerGeneration(mol)
+
+        # Generate conformers into the molecule
         conf_gen = ConfGen.ConformerGenerator()
-        conf_gen.setMaxNumConformers(num_conformers)
-        conf_gen.setRMSDThreshold(0.5)  # diversity threshold in Angstrom
+        settings = conf_gen.getSettings()
+        settings.setMaxNumOutputConformers(num_conformers)
+        settings.setMinRMSD(0.5)  # diversity threshold in Angstrom
         conf_gen.generate(mol)
+        conf_gen.setConformers(mol)
 
+        # Extract each conformer as a standalone molecule for SDF output.
+        # Follows the gen_mol_ph4s.py pattern: iterate conformer indices and
+        # use AtomConformer3DCoordinatesFunctor to access 3D coordinates.
+        num_confs = Chem.getNumConformations(mol)
         conformers = []
-        for conf_idx in range(mol.numConformers):
-            conf_mol = Chem.Molecule(mol)
-            conf_mol.setConformer(conf_idx)
+        for conf_idx in range(num_confs):
+            conf_mol = mol.clone()
+            # set the 3D coordinate source to this conformer's coords
+            Chem.applyConformation(conf_mol, conf_idx)
             conformers.append(conf_mol)
 
         print(f"  CDPKit generated {len(conformers)} conformers from SMILES")
@@ -500,7 +514,7 @@ def write_cdpkit_conformer_to_sdf(conf_mol, sdf_path):
     if not CDPKIT_AVAILABLE:
         print("ERROR: CDPKit not available, cannot write SDF")
         return
-    writer = Chem.SDFWriter(sdf_path)
+    writer = Chem.FileSDFMolecularGraphWriter(sdf_path)
     writer.write(conf_mol)
     writer.close()
 
@@ -509,24 +523,31 @@ def convert_conformer_to_params(sdf_path, ligand_name, conf_idx, output_dir,
                                  realm_location):
     """Convert an SDF conformer to Rosetta .params using molfile_to_params.py."""
     params_name = f"{ligand_name}_{conf_idx}"
-    params_file = os.path.join(output_dir, f"{params_name}.params")
+    # Resolve to absolute paths so the singularity container can see them
+    sdf_abs = os.path.abspath(sdf_path)
+    output_abs = os.path.abspath(output_dir)
+    params_file = os.path.join(output_abs, f"{params_name}.params")
 
     # Use molfile_to_params via the Rosetta/singularity container
     conformator_sif = os.path.join(realm_location, "sif", "conformator_container.sif")
     if os.path.exists(conformator_sif):
+        # Bind the directories containing the SDF and output so singularity
+        # can access them (auto-mount only covers $HOME, /tmp, and the CWD).
+        sdf_dir = os.path.dirname(sdf_abs)
+        bind_paths = f"{realm_location},{sdf_dir},{output_abs}"
         params_cmd = (
-            f"singularity exec {conformator_sif} python "
-            f"/conformator_for_container/molfile_to_params.py {sdf_path} "
+            f"singularity exec --bind {sdf_dir} {conformator_sif} python "
+            f"/conformator_for_container/molfile_to_params.py {sdf_abs} "
             f"-n {params_name} --keep-names --long-names --clobber --no-pdb"
         )
     else:
         # Fallback: try molfile_to_params directly (if Rosetta is in PATH)
         params_cmd = (
-            f"molfile_to_params.py {sdf_path} "
+            f"molfile_to_params.py {sdf_abs} "
             f"-n {params_name} --keep-names --long-names --clobber --no-pdb"
         )
 
-    rc = run_cmd(params_cmd, cwd=output_dir)
+    rc = run_cmd(params_cmd, cwd=output_abs)
     if rc != 0 or not os.path.exists(params_file):
         print(f"WARNING: molfile_to_params failed for {params_name}")
         return None
