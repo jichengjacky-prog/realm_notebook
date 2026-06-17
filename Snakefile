@@ -341,8 +341,9 @@ rule filter_top_round1:
     output:
         top_list = os.path.join(OUTPUT_DIR, "top_ligands_round1.txt"),
     params:
-        max_ligands = MAX_LIGANDS,
-        tmp_root    = TMP_ROOT,
+        max_ligands     = MAX_LIGANDS,
+        min_motif_ratio = MIN_MOTIF_RATIO,
+        tmp_root        = TMP_ROOT,
     resources:
         mem_mb=4000,
         cpus=1,
@@ -388,6 +389,8 @@ for sf in glob.glob(os.path.join('{params.tmp_root}', 'batch_*', 'scores_round1.
             lig = row['ligand']
             score = float(row['score'])
             mr = float(row['real_motif_ratio'])
+            if mr <= {params.min_motif_ratio}:
+                continue
             base = get_base_ligand_global(lig)
             if base not in seen or score > seen[base][0]:
                 seen[base] = (score, lig, mr)
