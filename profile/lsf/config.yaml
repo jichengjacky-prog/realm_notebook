@@ -1,0 +1,48 @@
+# Snakemake LSF profile configuration
+# Usage: snakemake --profile profile/lsf --configfile config.yaml
+#
+# Uses the cluster-generic executor to submit each rule as an LSF bsub job.
+# Resources (mem_mb, cpus, queue, walltime) are passed from the Snakefile rules.
+
+executor: cluster-generic
+
+# ── LSF job submission ─────────────────────────────────────────────────────
+# Submits a batch job via bsub.  {resources.*} come from rule definitions.
+# Note: bsub stdout/stderr are not captured with -o/-e — rule-level logs
+# are written by Snakemake's log: directive under tmp_root (which is under
+# output_dir).  LSF's own job output goes to the default location.
+cluster-generic-submit-cmd: "bash profile/lsf/submit.sh -q {resources.queue} -M {resources.mem_mb} -n {resources.cpus} -W {resources.walltime} -J 'smk.{rule}.{jobid}' -R 'rusage[mem={resources.mem_mb}]'"
+
+# ── LSF job status check ───────────────────────────────────────────────────
+# Snakemake calls this with the LSF job ID to check if it's still running.
+cluster-generic-status-cmd: "bash profile/lsf/bjobs_status.sh"
+
+# ── LSF job cancellation ───────────────────────────────────────────────────
+cluster-generic-cancel-cmd: "bkill"
+
+# ── Local job execution ────────────────────────────────────────────────────
+cores: 2000             # max cores used concurrently across all running jobs
+jobs: 2000              # max parallel jobs submitted at once (1 core each typically)
+latency-wait: 86400   # seconds to wait for upstream jobs (24h — must exceed longest rule walltime)
+restart-times: 2       # auto-retry failed jobs
+max-jobs-per-second: 100
+max-status-checks-per-second: 50
+
+# ── Shared NFS filesystem ─────────────────────────────────────────────────
+shared-fs-usage:
+  - persistence
+  - sources
+  - source-cache
+  - software-deployment
+  - software-deployment-cache
+  - input-output
+
+# ── Keep going on failure ─────────────────────────────────────────────────
+keep-going: true
+rerun-incomplete: true
+
+# ── Concurrent-run safety ─────────────────────────────────────────────────
+# Disable Snakemake's internal locking so two runs with different config
+# files don't clash on .snakemake/locks/.  Each run has its own output_dir
+# and tmp_root, so there is no data contention.
+nolock: true

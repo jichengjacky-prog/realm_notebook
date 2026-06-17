@@ -9,3 +9,4 @@ license/*
 test/*
 .vscode/*
 .snakemake/*
+yaml/*

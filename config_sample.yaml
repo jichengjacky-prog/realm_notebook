@@ -1,0 +1,35 @@
+# Snakemake configuration for Rosetta Ligand Discovery Pipeline
+#
+# Copy this file, edit the paths, and run:
+#   snakemake --cores 16 --configfile config.yaml
+#
+# Or override individual values on the command line:
+#   snakemake --cores 16 --configfile config.yaml --config target_pdb=my_protein.pdb
+
+# ── Required inputs ──────────────────────────────────────────────────────────
+shapedb_list:    "output/shapedb/orexin_lemborexant/combined_results/combined_best_3000000_chunks_00000_53084.txt"    # shapedb results list
+target_pdb:      "input_pdb/processed/orexin_lemborexant_receptor_R.pdb"
+anchor_residues: "239,242"                     # comma-separated Rosetta residue indices
+motifs_file:     "motifs/FINAL_motifs_list_filtered_2_3_2023.motifs"
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output_dir:      "output/snakemake_lemborexant_run"    # base output directory for Snakemake run
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+realm_location:  "/pi/summer.thyme-umw/Ji_rosetta_discovery"
+enamine_path:    "/pi/summer.thyme-umw/enamine-REAL-2.6billion"
+
+# ── Parameters ───────────────────────────────────────────────────────────────
+num_conformers:  400     # CDPKit conformers per ligand
+top_n:           200000    # top hits to keep
+batch_size:      10     # ligands per batch
+max_ligands:     10000    # max unique ligands in final output
+top_hits:        0       # limit input to top N shapedb hits (0 = all)
+atr:             -2.0    # fa_atr cutoff
+rep:             150.0   # fa_rep cutoff
+ddg:             -9.0    # ddg cutoff
+
+# ── Optional ─────────────────────────────────────────────────────────────────
+extra_params:    "extra_arg/sample_extra_arg"      # path to extra Rosetta args file
+# weights_file:    ""       # custom score weights CSV (default: score_weights.json)
+# tmp_root:         ""      # temp directory (default: output_dir/tmp)
