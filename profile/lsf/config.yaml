@@ -25,7 +25,7 @@ cores: 2000             # max cores used concurrently across all running jobs
 jobs: 2000              # max parallel jobs submitted at once (1 core each typically)
 latency-wait: 86400   # seconds to wait for upstream jobs (24h — must exceed longest rule walltime)
 restart-times: 2       # auto-retry failed jobs
-max-jobs-per-second: 100
+max-jobs-per-second: 20
 max-status-checks-per-second: 50
 
 # ── Shared NFS filesystem ─────────────────────────────────────────────────

@@ -71,40 +71,75 @@ LSF_WALLTIME_DEFAULT = config.get("lsf_walltime_default", "2:00")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BATCHES_DIR = os.path.join(OUTPUT_DIR, "batches")
+BATCH_SHARD_SIZE = 1000   # files per subdirectory — keeps NFS directories small
+PARSE_DONE_FLAG = os.path.join(OUTPUT_DIR, ".parse_shapedb.done")
 os.makedirs(BATCHES_DIR, exist_ok=True)
 
-# Read the shapedb list
-entries = []
-with open(SHAPEDB_LIST, "r") as fh:
-    for line in fh:
-        line = line.strip()
-        if not line:
-            continue
-        if TOP_HITS > 0 and len(entries) >= TOP_HITS:
-            break
-        fields = [f.strip() for f in line.split(",")]
-        if len(fields) < 4:
-            continue
-        score, ligand_conf, chunk, subchunk = fields[:4]
-        ligand_name = "_".join(ligand_conf.split("_")[:-1])
-        conf_num = int(ligand_conf.split("_")[-1])
-        entries.append((float(score), ligand_name, conf_num, chunk, subchunk))
+def batch_file_path(batch_id):
+    """Return the sharded path for a batch file.
+    Sharding (1000 files per subdir) keeps NFS directories fast even with
+    hundreds of thousands of batches."""
+    shard = int(batch_id) // BATCH_SHARD_SIZE
+    shard_dir = os.path.join(BATCHES_DIR, f"{shard:04d}")
+    return os.path.join(shard_dir, f"batch_{batch_id}.txt")
 
-# Split into batches, write batch files
-batch_ids = []
-batch = []
-for i, (score, lig, cn, ch, sc) in enumerate(entries):
-    batch.append((lig, cn, ch, sc))
-    if len(batch) >= BATCH_SIZE or i == len(entries) - 1:
-        batch_id = len(batch_ids)
-        batch_file = os.path.join(BATCHES_DIR, f"batch_{batch_id}.txt")
-        with open(batch_file, "w") as fh:
-            for l, c, h, s in batch:
-                fh.write(f"{l},{c},{h},{s}\n")
-        batch_ids.append(batch_id)
-        batch = []
+def _discover_batch_ids():
+    """Walk BATCHES_DIR and return a sorted list of existing batch IDs."""
+    ids = []
+    for root, dirs, files in os.walk(BATCHES_DIR):
+        for f in files:
+            if f.startswith("batch_") and f.endswith(".txt"):
+                try:
+                    ids.append(int(f[len("batch_"):-len(".txt")]))
+                except ValueError:
+                    pass
+    return sorted(ids)
 
-print(f"Split {len(entries)} entries into {len(batch_ids)} batches")
+if os.path.exists(PARSE_DONE_FLAG):
+    # ── Skip parsing; reconstruct BATCH_IDS from existing batch files ──
+    batch_ids = _discover_batch_ids()
+    print(f"Skipped shapedb parse ({PARSE_DONE_FLAG} exists) — "
+          f"found {len(batch_ids)} existing batches "
+          f"({(len(batch_ids) + BATCH_SHARD_SIZE - 1) // BATCH_SHARD_SIZE} shards)")
+else:
+    # ── Read the shapedb list ───────────────────────────────────────────
+    entries = []
+    with open(SHAPEDB_LIST, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if TOP_HITS > 0 and len(entries) >= TOP_HITS:
+                break
+            fields = [f.strip() for f in line.split(",")]
+            if len(fields) < 4:
+                continue
+            score, ligand_conf, chunk, subchunk = fields[:4]
+            ligand_name = "_".join(ligand_conf.split("_")[:-1])
+            conf_num = int(ligand_conf.split("_")[-1])
+            entries.append((float(score), ligand_name, conf_num, chunk, subchunk))
+
+    # ── Split into batches, write batch files (sharded into subdirectories) ─
+    batch_ids = []
+    batch = []
+    for i, (score, lig, cn, ch, sc) in enumerate(entries):
+        batch.append((lig, cn, ch, sc))
+        if len(batch) >= BATCH_SIZE or i == len(entries) - 1:
+            batch_id = len(batch_ids)
+            bf_path = batch_file_path(batch_id)
+            os.makedirs(os.path.dirname(bf_path), exist_ok=True)
+            with open(bf_path, "w") as fh:
+                for l, c, h, s in batch:
+                    fh.write(f"{l},{c},{h},{s}\n")
+            batch_ids.append(batch_id)
+            batch = []
+
+    print(f"Split {len(entries)} entries into {len(batch_ids)} batches "
+          f"({(len(batch_ids) + BATCH_SHARD_SIZE - 1) // BATCH_SHARD_SIZE} shards)")
+
+    # ── Write done flag ─────────────────────────────────────────────────
+    with open(PARSE_DONE_FLAG, "w") as f:
+        f.write(f"{len(batch_ids)} batches, {len(entries)} entries\n")
 
 # Wildcard: batch ID
 BATCH_IDS = batch_ids
@@ -130,7 +165,7 @@ rule all:
 rule extract_params:
     """Extract conformer params from the Enamine library for one batch."""
     input:
-        batch_file = os.path.join(BATCHES_DIR, "batch_{batch_id}.txt"),
+        batch_file = lambda wildcards: batch_file_path(wildcards.batch_id),
     output:
         done_flag        = os.path.join(TMP_ROOT, "batch_{batch_id}", "extract_params.done"),
         test_params_done = os.path.join(TMP_ROOT, "batch_{batch_id}", "test_params", ".round1_ready"),
@@ -274,7 +309,8 @@ sys.path.insert(0, '{params.realm}/function/discovery')
 from utils import score_placements
 
 # ── Load batch ligand list for dedup matching ────────────────────────
-batch_file = os.path.join('{params.batches_dir}', 'batch_{wildcards.batch_id}.txt')
+batch_id = int('{wildcards.batch_id}')
+batch_file = os.path.join('{params.batches_dir}', f'{{batch_id // 1000:04d}}', f'batch_{{batch_id}}.txt')
 batch_ligands = set()
 with open(batch_file, 'r') as fh:
     for line in fh:
@@ -363,8 +399,8 @@ batches_dir = os.path.join(output_dir, 'batches')
 batch_ligands_global = set()
 for batch_dir in glob.glob(os.path.join('{params.tmp_root}', 'batch_*')):
     batch_name = os.path.basename(batch_dir)  # e.g. "batch_0"
-    batch_id = batch_name.split('_')[-1]
-    batch_file = os.path.join(batches_dir, f'batch_{{batch_id}}.txt')
+    batch_id = int(batch_name.split('_')[-1])
+    batch_file = os.path.join(batches_dir, f'{{batch_id // 1000:04d}}', f'batch_{{batch_id}}.txt')
     if os.path.exists(batch_file):
         with open(batch_file, 'r') as fh:
             for line in fh:
@@ -451,7 +487,7 @@ rule generate_conformers:
     Disregards the round-1 extract_params.done signal — re-extracts from
     scratch for only the top-N ligands."""
     input:
-        batch_file  = os.path.join(BATCHES_DIR, "batch_{batch_id}.txt"),
+        batch_file  = lambda wildcards: batch_file_path(wildcards.batch_id),
         top_list    = os.path.join(OUTPUT_DIR, "top_ligands_round1.txt"),
     output:
         done_flag        = os.path.join(TMP_ROOT, "batch_{batch_id}", "conformers_generated.done"),
@@ -767,7 +803,8 @@ sys.path.insert(0, '{params.realm}/function/discovery')
 from utils import score_placements
 
 # ── Load batch ligand list for dedup matching ────────────────────────
-batch_file = os.path.join('{params.batches_dir}', 'batch_{wildcards.batch_id}.txt')
+batch_id = int('{wildcards.batch_id}')
+batch_file = os.path.join('{params.batches_dir}', f'{{batch_id // 1000:04d}}', f'batch_{{batch_id}}.txt')
 batch_ligands = set()
 with open(batch_file, 'r') as fh:
     for line in fh:
@@ -904,8 +941,8 @@ batch_ligands_global = set()
 ligand_chunk_info = {{}}  # base_ligand_name -> (chunk, subchunk)
 for batch_dir in glob.glob(os.path.join('{params.tmp_root}', 'batch_*')):
     batch_name = os.path.basename(batch_dir)
-    batch_id = batch_name.split('_')[-1]
-    batch_file = os.path.join(batches_dir, f'batch_{{batch_id}}.txt')
+    batch_id = int(batch_name.split('_')[-1])
+    batch_file = os.path.join(batches_dir, f'{{batch_id // 1000:04d}}', f'batch_{{batch_id}}.txt')
     if os.path.exists(batch_file):
         with open(batch_file, 'r') as fh:
             for line in fh:
