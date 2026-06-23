@@ -216,38 +216,55 @@ def generate_conformers_and_params_cdpkit(ligand_name, smiles, output_dir,
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path, tmp_root=None):
-	"""Create a test_params directory from a list of (ligand_name, conf_num, chunk, subchunk) tuples."""
-	test_params_dir = os.path.join(batch_dir, "test_params")
-	os.makedirs(test_params_dir, exist_ok=True)
+def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path, tmp_root=None, round_name="round1"):
+	"""Create per-ligand subdirectories under batch_dir/<round_name>/.
 	
-	# Create required Rosetta files
-	run_cmd("touch exclude_pdb_component_list.txt patches.txt", cwd=test_params_dir)
+	Structure:
+	    batch_dir/<round_name>/<ligand_name>/
+	        test_params/
+	            <ligand_name>_<conf_num>.params
+	            residue_types.txt       (lists params in this dir)
+	            patches.txt
+	            exclude_pdb_component_list.txt
 	
-	# Create residue_types.txt header
-	res_types_file = os.path.join(test_params_dir, "residue_types.txt")
-	with open(res_types_file, "w") as fh:
-		fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
-		fh.write("TYPE_SET_MODE full_atom\n")
-		fh.write("ATOM_TYPE_SET fa_standard\n")
-		fh.write("ELEMENT_SET default\n")
-		fh.write("MM_ATOM_TYPE_SET fa_standard\n")
-		fh.write("ORBITAL_TYPE_SET fa_standard\n")
-		fh.write("## Params files\n")
-	
-	# Extract and fix each conformer
+	Returns the list of ligand subdirs created.
+	"""
+	lig_dirs = []
 	failed_ligands = []
+	round_dir = os.path.join(batch_dir, round_name)
+	
 	for ligand_name, conf_num, chunk, subchunk in ligands_list:
+		# Per-ligand directory: batch_dir/<round_name>/<ligand_name>/
+		lig_dir = os.path.join(round_dir, ligand_name)
+		tp_dir = os.path.join(lig_dir, "test_params")
+		os.makedirs(tp_dir, exist_ok=True)
+		
+		# Create support files in test_params
+		run_cmd("touch exclude_pdb_component_list.txt patches.txt", cwd=tp_dir)
+		
 		try:
 			params_file = extract_conformer_params(
 				ligand_name, conf_num, chunk, subchunk, enamine_path,
-				batch_dir, output_dir=test_params_dir
+				batch_dir, output_dir=tp_dir
 			)
 			
 			if params_file:
-				# Add to residue_types.txt
+				# Write per-ligand residue_types.txt in test_params/
+				res_types_file = os.path.join(tp_dir, "residue_types.txt")
+				if not os.path.exists(res_types_file):
+					with open(res_types_file, "w") as fh:
+						fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
+						fh.write("TYPE_SET_MODE full_atom\n")
+						fh.write("ATOM_TYPE_SET fa_standard\n")
+						fh.write("ELEMENT_SET default\n")
+						fh.write("MM_ATOM_TYPE_SET fa_standard\n")
+						fh.write("ORBITAL_TYPE_SET fa_standard\n")
+						fh.write("## Params files\n")
+				
 				with open(res_types_file, "a") as fh:
 					fh.write(f"{ligand_name}_{conf_num}.params\n")
+				
+				lig_dirs.append(lig_dir)
 			else:
 				failed_ligands.append(f"{ligand_name}_{conf_num}")
 		
@@ -258,21 +275,22 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 	if failed_ligands:
 		print(f"WARNING: Failed to process {len(failed_ligands)} ligands")
 	
-	return test_params_dir
+	return lig_dirs
 
 
-def generate_and_add_conformers_to_test_params(test_params_dir, ligands_list, 
+def generate_and_add_conformers_to_test_params(batch_dir, ligands_list, 
 											   realm_location, enamine_path,
-											   num_conformers=150, tmp_root=None):
-	"""Generate CDPKit conformers from extracted params SMILES and add to test_params.
+											   num_conformers=150, tmp_root=None, round_name="round2"):
+	"""Generate CDPKit conformers and add to per-ligand test_params subdirs.
+	
+	Conformers are placed in:
+	    batch_dir/<round_name>/<ligand_name>/test_params/
+	
 	Returns True on success, False on failure."""
 	
-	# Get residue_types.txt path
-	res_types_file = os.path.join(test_params_dir, "residue_types.txt")
-	
-	# For each unique ligand, extract SMILES from its .params and generate conformers
 	processed_ligands = set()
 	shared_work_dir = tempfile.mkdtemp(dir=tmp_root)
+	round_dir = os.path.join(batch_dir, round_name)
 	
 	any_success = False
 	try:
@@ -280,6 +298,11 @@ def generate_and_add_conformers_to_test_params(test_params_dir, ligands_list,
 			if ligand_name in processed_ligands:
 				continue
 			processed_ligands.add(ligand_name)
+			
+			# Per-ligand directory
+			lig_dir = os.path.join(round_dir, ligand_name)
+			tp_dir = os.path.join(lig_dir, "test_params")
+			os.makedirs(tp_dir, exist_ok=True)
 			
 			print(f"Generating {num_conformers} CDPKit conformers for {ligand_name}...")
 			
@@ -299,15 +322,27 @@ def generate_and_add_conformers_to_test_params(test_params_dir, ligands_list,
 				continue
 			print(f"  SMILES: {smiles}")
 			
-			# Generate conformers and params using CDPKit
+			# Generate conformers and params using CDPKit (writes into tp_dir)
 			new_params = generate_conformers_and_params_cdpkit(
-				ligand_name, smiles, test_params_dir, realm_location,
+				ligand_name, smiles, tp_dir, realm_location,
 				num_conformers=num_conformers,
 				tmp_root=tmp_root, work_dir=shared_work_dir
 			)
 			
 			if new_params:
-				# Add generated params to residue_types.txt
+				# Write per-ligand residue_types.txt
+				res_types_file = os.path.join(tp_dir, "residue_types.txt")
+				if not os.path.exists(res_types_file):
+					with open(res_types_file, "w") as fh:
+						fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
+						fh.write("TYPE_SET_MODE full_atom\n")
+						fh.write("ATOM_TYPE_SET fa_standard\n")
+						fh.write("ELEMENT_SET default\n")
+						fh.write("MM_ATOM_TYPE_SET fa_standard\n")
+						fh.write("ORBITAL_TYPE_SET fa_standard\n")
+						fh.write("## Params files\n")
+					run_cmd("touch exclude_pdb_component_list.txt patches.txt", cwd=tp_dir)
+				
 				with open(res_types_file, "a") as fh:
 					for params_name in new_params:
 						fh.write(f"{params_name}\n")
