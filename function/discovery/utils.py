@@ -241,6 +241,25 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 		
 		# Create support files in test_params
 		run_cmd("touch exclude_pdb_component_list.txt patches.txt", cwd=tp_dir)
+
+		# Skip if params file already exists and is intact (non-empty)
+		expected_params = os.path.join(tp_dir, f"{ligand_name}_{conf_num}.params")
+		if os.path.isfile(expected_params) and os.path.getsize(expected_params) > 0:
+			print(f"SKIP: {expected_params} already exists and intact")
+			res_types_file = os.path.join(tp_dir, "residue_types.txt")
+			if not os.path.exists(res_types_file):
+				with open(res_types_file, "w") as fh:
+					fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
+					fh.write("TYPE_SET_MODE full_atom\n")
+					fh.write("ATOM_TYPE_SET fa_standard\n")
+					fh.write("ELEMENT_SET default\n")
+					fh.write("MM_ATOM_TYPE_SET fa_standard\n")
+					fh.write("ORBITAL_TYPE_SET fa_standard\n")
+					fh.write("## Params files\n")
+			with open(res_types_file, "a") as fh:
+				fh.write(f"{ligand_name}_{conf_num}.params\n")
+			lig_dirs.append(lig_dir)
+			continue
 		
 		try:
 			params_file = extract_conformer_params(

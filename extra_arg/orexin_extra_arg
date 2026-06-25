@@ -4,7 +4,7 @@
 -significant_residues_for_motifs 85,71
 -check_if_ligand_motifs_match_real true
 -minimum_motifs_formed_cutoff 6
--minimum_significant_motifs_formed_cutoff 1
+-minimum_significant_motifs_formed_cutoff 2
 -minimum_ratio_of_real_motifs_from_ligand 0.01
 
 

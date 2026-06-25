@@ -19,24 +19,47 @@ CONFIGFILE="${1:-yaml/config_state3.yaml}"
 START_STEP="${2:-1}"
 END_STEP="${3:-8}"
 
-SNAKEMAKE="/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/snakemake"
 PROFILE="profile/lsf"
 WORKFLOW_DIR="$(dirname "$0")/workflows"
 REALM_DIR="$(dirname "$0")"
 BATCH_SLICE_SIZE=500   # batches per Snakemake invocation
 
-# ── Derive output_dir from config ────────────────────────────────────────
-OUTPUT_DIR=$(/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python -c "
+# ── Derive paths from config ─────────────────────────────────────────────
+# Use the realm_env Python (which has PyYAML) to parse config.
+# The local yaml/ directory shadows the PyYAML package for system python3,
+# causing "module 'yaml' has no attribute 'safe_load'" errors.
+_REALM_PYTHON="/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11"
+
+PYTHON_BIN=$($_REALM_PYTHON -c "
+import yaml
+with open('$CONFIGFILE') as f:
+    cfg = yaml.safe_load(f)
+print(cfg.get('python_bin', 'python3.11'))
+" 2>/dev/null || echo "python3.11")
+
+SNAKEMAKE=$($_REALM_PYTHON -c "
+import yaml
+with open('$CONFIGFILE') as f:
+    cfg = yaml.safe_load(f)
+print(cfg.get('snakemake_bin', 'snakemake'))
+" 2>/dev/null || echo "snakemake")
+
+OUTPUT_DIR=$($_REALM_PYTHON -c "
 import yaml
 with open('$CONFIGFILE') as f:
     cfg = yaml.safe_load(f)
 print(cfg.get('output_dir', 'output'))
 " 2>/dev/null || echo "output/UNKNOWN_CONFIG_DIR")
 
+# ── Ensure output directory exists ──────────────────────────────────────
+mkdir -p "$OUTPUT_DIR"
+
 # ── Discover total batch count ───────────────────────────────────────────
-TOTAL_BATCHES=$(find "$OUTPUT_DIR/batches" -name "batch_*.txt" 2>/dev/null | wc -l)
+# Use subshells with || true to prevent set -eo pipefail from killing the
+# script when the directory doesn't exist yet.
+TOTAL_BATCHES=$( (find "$OUTPUT_DIR/batches" -name "batch_*.txt" 2>/dev/null || true) | wc -l)
 if [ "$TOTAL_BATCHES" -eq 0 ]; then
-    TOTAL_BATCHES=$(find "$OUTPUT_DIR/tmp" -maxdepth 2 -name "extract_params.done" 2>/dev/null | wc -l)
+    TOTAL_BATCHES=$( (find "$OUTPUT_DIR/tmp" -maxdepth 2 -name "extract_params.done" 2>/dev/null || true) | wc -l)
 fi
 echo "Total batches discovered: $TOTAL_BATCHES"
 
@@ -196,10 +219,19 @@ run_step() {
 # Run each step
 # ═══════════════════════════════════════════════════════════════════════════════
 
-run_sliced_step 1 "parse_and_extract" \
+# Step 1 is NOT sliced — it reads the shapedb list and creates batch files
+# internally.  Slicing depends on batch files that don't exist yet.
+run_step 1 "parse_and_extract" \
     "step1_parse_and_extract.smk" \
     "$STEP1_DONE" \
     "--resources load=1000"
+
+# Re-discover batch count now that step 1 has created batch files.
+TOTAL_BATCHES=$( (find "$OUTPUT_DIR/batches" -name "batch_*.txt" 2>/dev/null || true) | wc -l)
+if [ "$TOTAL_BATCHES" -eq 0 ]; then
+    TOTAL_BATCHES=$( (find "$OUTPUT_DIR/tmp" -maxdepth 2 -name "extract_params.done" 2>/dev/null || true) | wc -l)
+fi
+echo "Total batches after step 1: $TOTAL_BATCHES"
 
 run_sliced_step 2 "rosetta_round1" \
     "step2_rosetta1.smk" \

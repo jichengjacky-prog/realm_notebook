@@ -44,6 +44,7 @@ rule generate_conformers:
         num_conformers = NUM_CONFORMERS,
         license_key    = LICENSE_KEY,
         tmp_root       = TMP_ROOT,
+        python_bin     = PYTHON_BIN,
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "generate_conformers.log"),
     shell:
@@ -54,7 +55,7 @@ rule generate_conformers:
         rm -rf "$BATCH_DIR"/round1
 
         LIGANDS_FILE="$BATCH_DIR/.r2_ligands.txt"
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        {params.python_bin} -c "
 import sys, os
 sys.path.insert(0, '{params.realm_location}/function/discovery')
 
@@ -126,7 +127,7 @@ PYEOF
                 -J "$JOB_NAME" \
                 -o "$BATCH_DIR/genconf_$lig_name.out" \
                 -e "$BATCH_DIR/genconf_$lig_name.err" \
-                /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 "$SCRIPT" \
+                {params.python_bin} "$SCRIPT" \
                 "$lig_name" "$conf_num" "$chunk" "$subchunk" \
                 "$BATCH_DIR" '{params.realm_location}' '{params.enamine_path}' \
                 '{params.num_conformers}' 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)

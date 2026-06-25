@@ -17,9 +17,7 @@ import os
 configfile: "config.yaml"
 include: "workflows/shared_config.smk"
 
-# ── Snakemake path & profile ─────────────────────────────────────────────
-SNAKEMAKE_BIN = config.get("snakemake_bin",
-    "/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/snakemake")
+# ── Profile ─────────────────────────────────────────────────────────────
 PROFILE       = config.get("profile", "profile/lsf")
 WORKFLOW_DIR  = os.path.join(REALM_LOCATION, "workflows")
 

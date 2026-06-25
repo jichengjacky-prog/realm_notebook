@@ -70,7 +70,11 @@ if should_parse:
     with open(PARSE_DONE_FLAG, "w") as f:
         f.write(f"{len(batch_ids)} batches, {len(entries)} entries\n")
 
-BATCH_IDS = discover_batch_ids("batch_{batch_id}", "extract_params.done")
+# Use batch_ids from the parsing step (or resume branch) directly.
+# discover_batch_ids() looks for extract_params.done files which are
+# OUTPUTS of the extract_params rule — they don't exist on a fresh run,
+# so BATCH_IDS would be empty and Snakemake would never trigger extract_params.
+BATCH_IDS = [str(i) for i in batch_ids]
 
 # ── Step sentinel ────────────────────────────────────────────────────────
 STEP1_DONE = os.path.join(OUTPUT_DIR, ".step1_extract.done")
@@ -93,6 +97,7 @@ rule extract_params:
         realm_location = REALM_LOCATION,
         enamine_path   = ENAMINE_PATH,
         tmp_root       = TMP_ROOT,
+        python_bin     = PYTHON_BIN,
     resources:
         load=1,
         mem_mb=2000,
@@ -107,7 +112,14 @@ rule extract_params:
         BATCH_DIR=$(dirname {output.done_flag})
         mkdir -p $BATCH_DIR
 
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        # Skip if extract_params was already done (idempotent guard)
+        if [ -f {output.test_params_done} ]; then
+            echo "SKIP: {output.test_params_done} already exists — extract_params previously done"
+            touch {output.done_flag}
+            exit 0
+        fi
+
+        {params.python_bin} -c "
 import sys; sys.path.insert(0, '{params.realm_location}/function/discovery')
 from utils import create_test_params_dir
 

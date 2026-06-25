@@ -36,6 +36,7 @@ rule aggregate_results:
         max_ligands     = MAX_LIGANDS,
         min_motif_ratio = MIN_MOTIF_RATIO,
         tmp_root        = TMP_ROOT,
+        python_bin      = PYTHON_BIN,
     resources:
         mem_mb=16000,
         cpus=1,
@@ -44,7 +45,7 @@ rule aggregate_results:
     shell:
         """
         set -e
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        {params.python_bin} -c "
 import heapq, csv, glob, os
 
 scores_files = glob.glob(os.path.join('{params.tmp_root}', 'batch_*', 'scores_round2.csv'))
@@ -118,6 +119,7 @@ rule cleanup_intermediates:
         CLEANUP_DONE,
     params:
         tmp_root = TMP_ROOT,
+        python_bin = PYTHON_BIN,
     resources:
         mem_mb=500,
         cpus=1,
@@ -126,16 +128,51 @@ rule cleanup_intermediates:
     shell:
         """
         set -e
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
-import shutil, glob, os
+        {params.python_bin} -c "
+import shutil, glob, os, csv
+
+# Build set of base ligand names from top_ligands.csv
+# Format: rank,ligand_name,score,real_motif_ratio,chunk,subchunk
+# ligand_name is like PV-XXXX_58 (placement name with residue suffix)
+top_ligand_bases = set()
+with open('{input.top_ligands}', 'r') as fh:
+    reader = csv.DictReader(fh)
+    for row in reader:
+        lig_full = row.get('ligand_name', '')
+        if lig_full:
+            # Strip residue suffix: PV-XXXX_58 -> PV-XXXX
+            base = '_'.join(lig_full.split('_')[:-1]) if '_' in lig_full else lig_full
+            top_ligand_bases.add(base)
+print(f'Top ligand bases to preserve: {{len(top_ligand_bases)}}')
 
 for batch_dir in glob.glob(os.path.join('{params.tmp_root}', 'batch_*')):
     for entry in os.listdir(batch_dir):
         epath = os.path.join(batch_dir, entry)
         if os.path.isdir(epath):
-            if entry not in ('test_params', 'round1', 'round2'):
+            if entry == 'round1':
                 shutil.rmtree(epath, ignore_errors=True)
-            elif entry in ('round1', 'round2'):
+            elif entry == 'round2':
+                # Keep test_params only for top-hit ligands
+                for lig_entry in os.listdir(epath):
+                    lig_path = os.path.join(epath, lig_entry)
+                    if os.path.isdir(lig_path):
+                        if lig_entry in top_ligand_bases:
+                            # Keep test_params, delete other subdirs
+                            for sub in os.listdir(lig_path):
+                                sub_path = os.path.join(lig_path, sub)
+                                if os.path.isdir(sub_path) and sub != 'test_params':
+                                    shutil.rmtree(sub_path, ignore_errors=True)
+                                elif os.path.isfile(sub_path):
+                                    os.remove(sub_path)
+                            print(f'  Preserved test_params for top ligand: {{lig_entry}}')
+                        else:
+                            shutil.rmtree(lig_path, ignore_errors=True)
+                # Remove any loose files in round2/
+                for f in os.listdir(epath):
+                    fp = os.path.join(epath, f)
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+            elif entry != 'test_params':
                 shutil.rmtree(epath, ignore_errors=True)
         elif os.path.isfile(epath):
             if not (entry.endswith('.done') or
@@ -146,6 +183,6 @@ for batch_dir in glob.glob(os.path.join('{params.tmp_root}', 'batch_*')):
 
 with open('{output}', 'w') as fh:
     fh.write('done\\n')
-print('  All heavy intermediate files cleaned; .done, .csv & _ready preserved.')
+print('  All heavy intermediate files cleaned; top-hit conformer params preserved.')
 " > {log} 2>&1
         """

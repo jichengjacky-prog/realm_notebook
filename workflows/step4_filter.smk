@@ -35,6 +35,7 @@ rule filter_top_round1:
         max_ligands     = MAX_LIGANDS,
         min_motif_ratio = MIN_MOTIF_RATIO,
         tmp_root        = TMP_ROOT,
+        python_bin      = PYTHON_BIN,
     resources:
         mem_mb=4000,
         cpus=1,
@@ -43,7 +44,7 @@ rule filter_top_round1:
     shell:
         """
         set -e
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        {params.python_bin} -c "
 import heapq, csv, shutil, glob, os
 
 output_dir = os.path.dirname(os.path.dirname('{params.tmp_root}'))

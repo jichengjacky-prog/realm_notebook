@@ -46,6 +46,7 @@ rule rosetta_discovery_round1:
         rosetta_queue   = LSF_QUEUE_ROSETTA,
         default_queue   = LSF_QUEUE_DEFAULT,
         rosetta_walltime = LSF_WALLTIME_ROSETTA,
+        python_bin      = PYTHON_BIN,
     resources:
         load=10,         
         mem_mb=8000,
@@ -131,7 +132,7 @@ PYEOF
                 -J "$JOB_NAME" \
                 -o "$BATCH_DIR/round1/ros1_$LIG_NAME.out" \
                 -e "$BATCH_DIR/round1/ros1_$LIG_NAME.err" \
-                /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 "$SCRIPT" "$LIG_NAME" "$TP_DIR" "$BATCH_DIR" 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
+                {params.python_bin} "$SCRIPT" "$LIG_NAME" "$TP_DIR" "$BATCH_DIR" 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
             [ -n "$JOB_ID" ] && JOB_IDS+=("$JOB_ID")
             echo "Submitted $JOB_NAME ($JOB_ID)"
             sleep 0.05

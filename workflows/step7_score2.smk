@@ -37,6 +37,7 @@ rule score_round2:
         weights_file = WEIGHTS_FILE,
         realm        = REALM_LOCATION,
         batches_dir  = BATCHES_DIR,
+        python_bin   = PYTHON_BIN,
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "score_round2.log"),
     shell:
@@ -44,7 +45,7 @@ rule score_round2:
         set -e
         BATCH_DIR=$(dirname {output.scores_csv})
 
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        {params.python_bin} -c "
 import sys, os, csv, glob
 sys.path.insert(0, '{params.realm}/function/discovery')
 from utils import score_placements
@@ -92,7 +93,13 @@ with open('{output.scores_csv}', 'w', newline='') as fh:
 print(f'Scored {{len(best)}} unique ligands (from {{len(scores)}} placements) (round 2)')
 " > {log} 2>&1
 
-        rm -rf "$BATCH_DIR"/round2
+        # Keep test_params (conformer params), delete heavy per-residue Rosetta output
+        if [ -d "$BATCH_DIR"/round2 ]; then
+            for LIG_DIR in "$BATCH_DIR"/round2/*/; do
+                [ -d "$LIG_DIR" ] || continue
+                find "$LIG_DIR" -mindepth 1 -maxdepth 1 ! -name 'test_params' -exec rm -rf {} + 2>/dev/null
+            done
+        fi
         rm -f "$BATCH_DIR"/rosetta_round2_*.log
         """
 

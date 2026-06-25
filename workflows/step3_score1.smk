@@ -33,6 +33,7 @@ rule score_round1:
         weights_file = WEIGHTS_FILE,
         realm        = REALM_LOCATION,
         batches_dir  = BATCHES_DIR,
+        python_bin   = PYTHON_BIN,
     resources:
         mem_mb=2000,
         cpus=1,
@@ -45,7 +46,7 @@ rule score_round1:
         set -e
         BATCH_DIR=$(dirname {output.scores_csv})
 
-        /home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11 -c "
+        {params.python_bin} -c "
 import sys, os, csv, glob
 sys.path.insert(0, '{params.realm}/function/discovery')
 from utils import score_placements

@@ -18,6 +18,8 @@ output_dir:      "output/snakemake_lemborexant_run"    # base output directory f
 # ── Paths ────────────────────────────────────────────────────────────────────
 realm_location:  "/pi/summer.thyme-umw/Ji_rosetta_discovery"
 enamine_path:    "/pi/summer.thyme-umw/enamine-REAL-2.6billion"
+python_bin:      "/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/python3.11"
+snakemake_bin:   "/home/ji.cheng4-umw/miniforge3/envs/realm_env/bin/snakemake"
 
 # ── Parameters ───────────────────────────────────────────────────────────────
 num_conformers:  400     # CDPKit conformers per ligand
