@@ -94,8 +94,13 @@ with open('{output.scores_csv}', 'w', newline='') as fh:
 print(f'Scored {{len(best)}} unique ligands (from {{len(scores)}} placements)')
 " > {log} 2>&1
 
-        rm -rf "$BATCH_DIR"/round1
-        rm -f "$BATCH_DIR"/rosetta_round1.log
+        # Only clean up round1 if scores CSV was successfully written (idempotent guard)
+        if [ -s {output.scores_csv} ]; then
+            rm -rf "$BATCH_DIR"/round1
+            rm -f "$BATCH_DIR"/rosetta_round1.log
+        else
+            echo "WARNING: scores_round1.csv is empty — keeping round1 data for debugging"
+        fi
         """
 
 

@@ -247,6 +247,7 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 		if os.path.isfile(expected_params) and os.path.getsize(expected_params) > 0:
 			print(f"SKIP: {expected_params} already exists and intact")
 			res_types_file = os.path.join(tp_dir, "residue_types.txt")
+			params_entry = f"{ligand_name}_{conf_num}.params"
 			if not os.path.exists(res_types_file):
 				with open(res_types_file, "w") as fh:
 					fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
@@ -256,8 +257,14 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 					fh.write("MM_ATOM_TYPE_SET fa_standard\n")
 					fh.write("ORBITAL_TYPE_SET fa_standard\n")
 					fh.write("## Params files\n")
-			with open(res_types_file, "a") as fh:
-				fh.write(f"{ligand_name}_{conf_num}.params\n")
+					fh.write(params_entry + "\n")
+			else:
+				# Only append if entry not already present (idempotent)
+				with open(res_types_file, "r") as fh:
+					existing = fh.read()
+				if params_entry not in existing:
+					with open(res_types_file, "a") as fh:
+						fh.write(params_entry + "\n")
 			lig_dirs.append(lig_dir)
 			continue
 		
@@ -270,6 +277,7 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 			if params_file:
 				# Write per-ligand residue_types.txt in test_params/
 				res_types_file = os.path.join(tp_dir, "residue_types.txt")
+				params_entry = f"{ligand_name}_{conf_num}.params"
 				if not os.path.exists(res_types_file):
 					with open(res_types_file, "w") as fh:
 						fh.write("## atom_type_set and mm-atom_type_set for Rosetta\n")
@@ -279,9 +287,14 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 						fh.write("MM_ATOM_TYPE_SET fa_standard\n")
 						fh.write("ORBITAL_TYPE_SET fa_standard\n")
 						fh.write("## Params files\n")
-				
-				with open(res_types_file, "a") as fh:
-					fh.write(f"{ligand_name}_{conf_num}.params\n")
+						fh.write(params_entry + "\n")
+				else:
+					# Only append if entry not already present (idempotent)
+					with open(res_types_file, "r") as fh:
+						existing = fh.read()
+					if params_entry not in existing:
+						with open(res_types_file, "a") as fh:
+							fh.write(params_entry + "\n")
 				
 				lig_dirs.append(lig_dir)
 			else:
@@ -323,6 +336,13 @@ def generate_and_add_conformers_to_test_params(batch_dir, ligands_list,
 			tp_dir = os.path.join(lig_dir, "test_params")
 			os.makedirs(tp_dir, exist_ok=True)
 			
+			# Idempotency guard: skip if conformer params already generated
+			existing_params = [f for f in os.listdir(tp_dir) if f.endswith('.params')]
+			if len(existing_params) >= num_conformers:
+				print(f"SKIP: {len(existing_params)} conformer params already exist for {ligand_name} (need {num_conformers})")
+				any_success = True
+				continue
+			
 			print(f"Generating {num_conformers} CDPKit conformers for {ligand_name}...")
 			
 			# Extract original conformer params (returns text, no file written)
@@ -349,7 +369,7 @@ def generate_and_add_conformers_to_test_params(batch_dir, ligands_list,
 			)
 			
 			if new_params:
-				# Write per-ligand residue_types.txt
+				# Write per-ligand residue_types.txt (idempotent: skip existing entries)
 				res_types_file = os.path.join(tp_dir, "residue_types.txt")
 				if not os.path.exists(res_types_file):
 					with open(res_types_file, "w") as fh:
@@ -361,10 +381,15 @@ def generate_and_add_conformers_to_test_params(batch_dir, ligands_list,
 						fh.write("ORBITAL_TYPE_SET fa_standard\n")
 						fh.write("## Params files\n")
 					run_cmd("touch exclude_pdb_component_list.txt patches.txt", cwd=tp_dir)
+					existing_entries = set()
+				else:
+					with open(res_types_file, "r") as fh:
+						existing_entries = set(line.strip() for line in fh if line.strip() and not line.startswith("#"))
 				
 				with open(res_types_file, "a") as fh:
 					for params_name in new_params:
-						fh.write(f"{params_name}\n")
+						if params_name not in existing_entries:
+							fh.write(f"{params_name}\n")
 				any_success = True
 			else:
 				print(f"WARNING: No conformers generated for {ligand_name}")
@@ -1007,6 +1032,14 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 		orig_cwd = None
 
 	try:
+		# Idempotency guard: skip if output already exists from a previous run
+		if work_dir and os.path.isfile(os.path.join(work_dir, "weighted_scores.csv")):
+			print(f"SKIP: weighted_scores.csv already exists in {work_dir} — Rosetta already completed")
+			return True
+		if work_dir and os.path.isfile(os.path.join(work_dir, "placements.tar.gz")):
+			print(f"SKIP: placements.tar.gz already exists in {work_dir} — Rosetta already completed")
+			return True
+
 		# Ensure test_params_dir ends with /
 		if not test_params_dir.endswith("/"):
 			test_params_dir = test_params_dir + "/"

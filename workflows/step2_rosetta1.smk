@@ -98,6 +98,10 @@ for residue in '{params.anchor_residues}'.split(','):
     res = residue.strip()
     res_dir = os.path.join(batch_dir, 'round1', lig_name, res)
     os.makedirs(res_dir, exist_ok=True)
+    # Idempotency guard: skip if weighted_scores.csv already exists for this residue
+    if os.path.isfile(os.path.join(res_dir, 'weighted_scores.csv')):
+        print(f'  SKIP: weighted_scores.csv already exists for {{lig_name}}/{{res}}')
+        continue
     success = run_rosetta_discovery_search(
         '{params.target_pdb}', res, '{params.motifs_file}',
         tp_dir, '{params.discovery_root}',
@@ -124,8 +128,9 @@ for residue in '{params.anchor_residues}'.split(','):
                 pass
 print('Rosetta done for ' + lig_name)
 PYEOF
-            JOB_ID=$(bsub -q {params.rosetta_queue} \
+            JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
+                -q {params.rosetta_queue} \
                 -M 8000 \
                 -n 1 \
                 -R 'span[hosts=1] rusage[mem=8000]' \

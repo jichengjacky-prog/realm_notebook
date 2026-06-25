@@ -22,7 +22,8 @@ END_STEP="${3:-8}"
 PROFILE="profile/lsf"
 WORKFLOW_DIR="$(dirname "$0")/workflows"
 REALM_DIR="$(dirname "$0")"
-BATCH_SLICE_SIZE=500   # batches per Snakemake invocation
+BATCH_SLICE_SIZE=500      # batches per Snakemake invocation
+MAX_CONCURRENT_SLICES=12  # max slices to run simultaneously
 
 # ── Derive paths from config ─────────────────────────────────────────────
 # Use the realm_env Python (which has PyYAML) to parse config.
@@ -113,6 +114,7 @@ run_sliced_step() {
     local total_slices=$(( (TOTAL_BATCHES + BATCH_SLICE_SIZE - 1) / BATCH_SLICE_SIZE ))
     local pids=()
     local slice_sentinels=()
+    local running=0
 
     for ((slice=0; slice<total_slices; slice++)); do
         local start=$((slice * BATCH_SLICE_SIZE))
@@ -129,6 +131,22 @@ run_sliced_step() {
             echo "--- Slice $((slice+1))/$total_slices (batches $start–$((end-1))) [$step_name] — already done ---"
             continue
         fi
+
+        # ── Concurrency limiter: wait if we already have MAX_CONCURRENT_SLICES running ──
+        while [ "$running" -ge "$MAX_CONCURRENT_SLICES" ]; do
+            # Wait for any one child to finish, then reap it
+            wait -n "${pids[@]}" 2>/dev/null || true
+            running=$((running - 1))
+            # Remove completed PIDs from the tracking array so later
+            # "wait for all" doesn't trip over already-reaped children
+            local _new_pids=()
+            for _p in "${pids[@]}"; do
+                if kill -0 "$_p" 2>/dev/null; then
+                    _new_pids+=("$_p")
+                fi
+            done
+            pids=("${_new_pids[@]}")
+        done
 
         echo "--- Slice $((slice+1))/$total_slices (batches $start–$((end-1))) [$step_name] launched ---"
 
@@ -152,9 +170,10 @@ run_sliced_step() {
             fi
         ) &
         pids+=($!)
+        running=$((running + 1))
     done
 
-    # Wait for all slices to finish
+    # Wait for all remaining slices to finish
     local failed=0
     for pid in "${pids[@]}"; do
         if ! wait "$pid"; then
@@ -236,12 +255,12 @@ echo "Total batches after step 1: $TOTAL_BATCHES"
 run_sliced_step 2 "rosetta_round1" \
     "step2_rosetta1.smk" \
     "$STEP2_DONE" \
-    "--resources load=20"
+    "--resources load=10"
 
 run_sliced_step 3 "score_round1" \
     "step3_score1.smk" \
     "$STEP3_DONE" \
-    "--resources load=150"
+    "--resources load=100"
 
 run_step 4 "filter_top" \
     "step4_filter.smk" \
@@ -256,12 +275,12 @@ run_sliced_step 5 "generate_conformers" \
 run_sliced_step 6 "rosetta_round2" \
     "step6_rosetta2.smk" \
     "$STEP6_DONE" \
-    "--resources load=50"
+    "--resources load=10"
 
 run_sliced_step 7 "score_round2" \
     "step7_score2.smk" \
     "$STEP7_DONE" \
-    "--resources load=20"
+    "--resources load=100"
 
 run_step 8 "aggregate_cleanup" \
     "step8_aggregate.smk" \

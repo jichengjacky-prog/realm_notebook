@@ -93,14 +93,19 @@ with open('{output.scores_csv}', 'w', newline='') as fh:
 print(f'Scored {{len(best)}} unique ligands (from {{len(scores)}} placements) (round 2)')
 " > {log} 2>&1
 
-        # Keep test_params (conformer params), delete heavy per-residue Rosetta output
-        if [ -d "$BATCH_DIR"/round2 ]; then
-            for LIG_DIR in "$BATCH_DIR"/round2/*/; do
-                [ -d "$LIG_DIR" ] || continue
-                find "$LIG_DIR" -mindepth 1 -maxdepth 1 ! -name 'test_params' -exec rm -rf {} + 2>/dev/null
-            done
+        # Only clean up round2 if scores CSV was successfully written (idempotent guard)
+        if [ -s {output.scores_csv} ]; then
+            # Keep test_params (conformer params), delete heavy per-residue Rosetta output
+            if [ -d "$BATCH_DIR"/round2 ]; then
+                for LIG_DIR in "$BATCH_DIR"/round2/*/; do
+                    [ -d "$LIG_DIR" ] || continue
+                    find "$LIG_DIR" -mindepth 1 -maxdepth 1 ! -name 'test_params' -exec rm -rf {} + 2>/dev/null
+                done
+            fi
+            rm -f "$BATCH_DIR"/rosetta_round2_*.log
+        else
+            echo "WARNING: scores_round2.csv is empty — keeping round2 data for debugging"
         fi
-        rm -f "$BATCH_DIR"/rosetta_round2_*.log
         """
 
 
