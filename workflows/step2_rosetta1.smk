@@ -86,7 +86,24 @@ rule rosetta_discovery_round1:
             # Write per-ligand Python script to round1/
             SCRIPT="$BATCH_DIR/round1/ros1_$LIG_NAME.py"
             cat > "$SCRIPT" << 'PYEOF'
-import sys, os, glob
+import sys, os, glob, signal, atexit
+
+# ── Hard timeout: force-exit after 11.5h (Rosetta walltime is 12h) ──────
+_HARD_TIMEOUT = 11.5 * 3600
+
+def _handle_alarm(signum, frame):
+    print(f'\nFATAL: Hard timeout ({_HARD_TIMEOUT}s) reached — forcing exit', file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1)
+
+signal.signal(signal.SIGALRM, _handle_alarm)
+signal.alarm(int(_HARD_TIMEOUT))
+
+# Ensure output is flushed on normal exit (prevents NFS-buffered hangs)
+atexit.register(sys.stdout.flush)
+atexit.register(sys.stderr.flush)
+
 sys.path.insert(0, '{params.discovery_root}/function/discovery')
 from utils import run_rosetta_discovery_search
 
@@ -126,7 +143,13 @@ for residue in '{params.anchor_residues}'.split(','):
                     os.remove(f)
             except Exception:
                 pass
+
 print('Rosetta done for ' + lig_name)
+sys.stdout.flush()
+sys.stderr.flush()
+# NOTE: alarm intentionally NOT cancelled — if interpreter shutdown hangs
+# (NFS, stuck subprocess), SIGALRM will force os._exit(1) after timeout.
+os._exit(0)
 PYEOF
             JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
@@ -173,13 +196,29 @@ PYEOF
                 if [ "$STAT" = "RUN" ] || [ "$STAT" = "PEND" ]; then
                     STILL_RUNNING=1
 
-                    # ── Stuck-job detection: 0% CPU peak = hung on NFS or idle ──
+                    # ── Stuck-job detection: two independent signals ──
                     if [ "$STAT" = "RUN" ]; then
+                        STUCK=0
+
+                        # Signal 1: CPU PEAK still at 0.00 (job never started computing)
                         CPU_PEAK=$(bjobs -l "$JID" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
                         if [ "$CPU_PEAK" = "0.00" ] || [ -z "$CPU_PEAK" ]; then
+                            STUCK=1
+                        fi
+
+                        # Signal 2: .out file not modified in >30 min (job hung after completing work)
+                        OUT_FILE="$BATCH_DIR/round1/ros1_${{LIG_NAMES[$i]}}.out"
+                        if [ -f "$OUT_FILE" ]; then
+                            OUT_AGE=$(($(date +%s) - $(stat -c %Y "$OUT_FILE" 2>/dev/null || echo 0)))
+                            if [ "$OUT_AGE" -gt 1800 ]; then
+                                STUCK=1
+                            fi
+                        fi
+
+                        if [ "$STUCK" -eq 1 ]; then
                             JOB_STUCK_COUNT[$JID]=$((${{JOB_STUCK_COUNT[$JID]:-0}} + 1))
                             if [ ${{JOB_STUCK_COUNT[$JID]}} -ge "$STUCK_THRESHOLD" ]; then
-                                echo "WARNING: Job $JID appears stuck (0% CPU for $STUCK_THRESHOLD checks, ~$((STUCK_THRESHOLD * 5 / 60))h) — killing"
+                                echo "WARNING: Job $JID appears stuck ($STUCK_THRESHOLD consecutive checks) — killing"
                                 bkill "$JID" 2>/dev/null || true
                                 unset JOB_STUCK_COUNT[$JID]
                             fi

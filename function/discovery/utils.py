@@ -487,12 +487,15 @@ def extract_smiles_from_params(params_text):
 # Shell helpers
 # ---------------------------------------------------------------------------
 
-def run_cmd(cmd, cwd=None, description="", stream_output=True):
+def run_cmd(cmd, cwd=None, description="", stream_output=True, timeout=None):
 	"""Run a shell command. Returns returncode.
 
 	When stream_output=True (default), stdout/stderr are printed in real time
 	so long-running commands don't appear stuck.  Set to False to capture and
 	print only after completion.
+
+	If timeout (seconds) is given and the command exceeds it, the subprocess
+	is killed (SIGTERM then SIGKILL) and the function returns -1.
 	"""
 	if description:
 		print(f"  {description}")
@@ -505,12 +508,25 @@ def run_cmd(cmd, cwd=None, description="", stream_output=True):
 			stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
 			text=True, bufsize=1
 		) as proc:
-			for line in proc.stdout:
-				print(line, end="")
-			proc.wait()
-			return proc.returncode
+			try:
+				for line in proc.stdout:
+					print(line, end="")
+				proc.wait(timeout=timeout)
+				return proc.returncode
+			except subprocess.TimeoutExpired:
+				print(f"\n  TIMEOUT: command exceeded {timeout}s — killing process tree", file=sys.stderr)
+				proc.kill()
+				try:
+					proc.wait(timeout=30)
+				except subprocess.TimeoutExpired:
+					print("  WARNING: process did not respond to SIGKILL", file=sys.stderr)
+				return -1
 	else:
-		result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+		try:
+			result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd, timeout=timeout)
+		except subprocess.TimeoutExpired:
+			print(f"\n  TIMEOUT: command exceeded {timeout}s", file=sys.stderr)
+			return -1
 		if result.stdout:
 			print(result.stdout, end="")
 		if result.stderr:
@@ -1096,7 +1112,7 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 		print(rosetta_cmd)
 
 		print("Running Rosetta discovery search...")
-		rosetta_result  = run_cmd(rosetta_cmd)
+		rosetta_result  = run_cmd(rosetta_cmd, timeout=36000)  # 10h timeout
 
 		if rosetta_result != 0:
 			print("ERROR: Rosetta discovery search failed")
