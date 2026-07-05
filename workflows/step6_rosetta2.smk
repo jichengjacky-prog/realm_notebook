@@ -143,36 +143,81 @@ PYEOF
             exit 0
         fi
 
+        # ── Wait for all per-ligand jobs with stuck-job watchdog ─────
+        # Two-layer protection:
+        #   1. CPU monitor: 0% CPU peak for STUCK_THRESHOLD checks → bkill zombie
+        #   2. Hard timeout: MAX_WAIT_HOURS overall → break out (pipeline can resume)
         echo "Waiting for all per-ligand jobs to finish..."
+        WAIT_START=$(date +%s)
+        STUCK_THRESHOLD=4          # 4 consecutive checks (20min) with 0% CPU → stuck
+        MAX_WAIT_HOURS=48          # absolute max wait time for the batch
+        declare -A JOB_STUCK_COUNT
 
         while true; do
+            NOW=$(date +%s)
+            ELAPSED_HRS=$(( (NOW - WAIT_START) / 3600 ))
+            if [ "$ELAPSED_HRS" -ge "$MAX_WAIT_HOURS" ]; then
+                echo "WARNING: Maximum wait time ($MAX_WAIT_HOURS h) exceeded — breaking out"
+                break
+            fi
+
             STILL_RUNNING=0
             for JID in "${{JOB_IDS[@]}}"; do
                 STAT=$(bjobs -o stat -noheader "$JID" 2>/dev/null | tr -d ' ')
                 if [ "$STAT" = "RUN" ] || [ "$STAT" = "PEND" ]; then
                     STILL_RUNNING=1
-                    break
+
+                    # ── Stuck-job detection: 0% CPU peak = hung on NFS or idle ──
+                    if [ "$STAT" = "RUN" ]; then
+                        CPU_PEAK=$(bjobs -l "$JID" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
+                        if [ "$CPU_PEAK" = "0.00" ] || [ -z "$CPU_PEAK" ]; then
+                            JOB_STUCK_COUNT[$JID]=$((${{JOB_STUCK_COUNT[$JID]:-0}} + 1))
+                            if [ ${{JOB_STUCK_COUNT[$JID]}} -ge "$STUCK_THRESHOLD" ]; then
+                                echo "WARNING: Job $JID appears stuck (0% CPU for $STUCK_THRESHOLD checks, ~$((STUCK_THRESHOLD * 5 / 60))h) — killing"
+                                bkill "$JID" 2>/dev/null || true
+                                unset JOB_STUCK_COUNT[$JID]
+                            fi
+                        else
+                            JOB_STUCK_COUNT[$JID]=0
+                        fi
+                    fi
                 fi
             done
+
             if [ "$STILL_RUNNING" -eq 0 ]; then
                 CSV_COUNT=$(find "$BATCH_DIR"/round2 -name 'weighted_scores.csv' 2>/dev/null | wc -l)
                 echo "All per-ligand jobs finished — $CSV_COUNT weighted_scores.csv files produced"
                 break
             fi
+
+            # Periodic status report (every ~10 min)
+            if [ $(( (NOW - WAIT_START) % 600 )) -lt 30 ]; then
+                RUN_COUNT=0; PEND_COUNT=0
+                for JID in "${{JOB_IDS[@]}}"; do
+                    S=$(bjobs -o stat -noheader "$JID" 2>/dev/null | tr -d ' ')
+                    [ "$S" = "RUN" ] && RUN_COUNT=$((RUN_COUNT + 1))
+                    [ "$S" = "PEND" ] && PEND_COUNT=$((PEND_COUNT + 1))
+                done
+                CSV_COUNT=$(find "$BATCH_DIR"/round2 -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+                echo "[+${{ELAPSED_HRS}}h] Status: $RUN_COUNT RUN, $PEND_COUNT PEND, $CSV_COUNT CSVs so far"
+            fi
+
             sleep 30
         done
 
-        # ── Per-ligand cleanup: remove logs if successful, touch done ──
+        # ── Per-ligand cleanup: remove logs if ALL CSVs present, touch done ──
         for i in "${{!LIG_NAMES[@]}}"; do
             LIG="${{LIG_NAMES[$i]}}"
             LIG_DIR="$BATCH_DIR/round2/$LIG"
-            CSV_FILE=$(find "$LIG_DIR" -name 'weighted_scores.csv' 2>/dev/null | head -1)
-            if [ -n "$CSV_FILE" ]; then
+            CSV_COUNT=$(find "$LIG_DIR" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+            if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
                 rm -f "$BATCH_DIR/round2/ros2_$LIG.out" \
                       "$BATCH_DIR/round2/ros2_$LIG.err" \
                       "$BATCH_DIR/round2/ros2_$LIG.py"
                 touch "$BATCH_DIR/round2/$LIG.done"
-                echo "Ligand $LIG: SUCCESS — cleaned logs, touched done"
+                echo "Ligand $LIG: SUCCESS ($CSV_COUNT/$ANCHOR_COUNT CSVs) — cleaned logs, touched done"
+            elif [ "$CSV_COUNT" -gt 0 ]; then
+                echo "Ligand $LIG: PARTIAL ($CSV_COUNT/$ANCHOR_COUNT CSVs) — keeping logs for re-run"
             else
                 echo "Ligand $LIG: FAILED or no output — keeping logs for debugging"
             fi

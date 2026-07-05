@@ -22,8 +22,8 @@ cluster-generic-status-cmd: "bash profile/lsf/bjobs_status.sh"
 cluster-generic-cancel-cmd: "bkill"
 
 # ── Local job execution ────────────────────────────────────────────────────         # max load (sum of resources.load) across all running jobs before Snakemake waits to submit more
-cores: 1000             # max cores used concurrently across all running jobs
-jobs: 1000              # max parallel jobs submitted at once (1 core each typically)
+cores: 1500             # max cores used concurrently across all running jobs
+jobs: 1500              # max parallel jobs submitted at once (1 core each typically)
 latency-wait: 300     # seconds to wait for output files to appear on NFS (5 min)
 restart-times: 2       # auto-retry failed jobs
 max-jobs-per-second: 20

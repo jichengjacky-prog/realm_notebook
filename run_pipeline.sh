@@ -252,10 +252,16 @@ if [ "$TOTAL_BATCHES" -eq 0 ]; then
 fi
 echo "Total batches after step 1: $TOTAL_BATCHES"
 
+if [ "$TOTAL_BATCHES" -eq 0 ]; then
+    echo "ERROR: No batch files found in $OUTPUT_DIR/batches/ or $OUTPUT_DIR/tmp/" >&2
+    echo "Step 1 (parse_and_extract) may have failed silently — check its log." >&2
+    exit 1
+fi
+
 run_sliced_step 2 "rosetta_round1" \
     "step2_rosetta1.smk" \
     "$STEP2_DONE" \
-    "--resources load=10"
+    "--resources load=20"
 
 run_sliced_step 3 "score_round1" \
     "step3_score1.smk" \
@@ -275,7 +281,7 @@ run_sliced_step 5 "generate_conformers" \
 run_sliced_step 6 "rosetta_round2" \
     "step6_rosetta2.smk" \
     "$STEP6_DONE" \
-    "--resources load=10"
+    "--resources load=20"
 
 run_sliced_step 7 "score_round2" \
     "step7_score2.smk" \

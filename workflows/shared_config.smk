@@ -49,7 +49,7 @@ os.makedirs(BATCHES_DIR, exist_ok=True)
 # ── LSF cluster resource defaults ────────────────────────────────────────
 LSF_QUEUE_ROSETTA    = config.get("lsf_queue_rosetta",    "long")
 LSF_QUEUE_DEFAULT    = config.get("lsf_queue_default",    "short")
-LSF_WALLTIME_ROSETTA  = config.get("lsf_walltime_rosetta",  "8:00")
+LSF_WALLTIME_ROSETTA  = config.get("lsf_walltime_rosetta",  "12:00")
 LSF_WALLTIME_DEFAULT  = config.get("lsf_walltime_default",  "4:00")
 LSF_QUEUE_BOTH   = config.get("lsf_queue_both",    "\"long short\"")
 LSF_WALLTIME_BOTH =  config.get("lsf_queue_both",    "8:00")
