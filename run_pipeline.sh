@@ -86,6 +86,56 @@ echo "╚═══════════════════════�
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Zombie watchdog — runs in background, kills stuck LSF jobs every 10 min
+# ═══════════════════════════════════════════════════════════════════════════════
+WATCHDOG_PID=""
+WATCHDOG_INTERVAL=600  # 10 minutes between checks
+WATCHDOG_LOG="$OUTPUT_DIR/.zombie_watchdog.log"
+
+zombie_watchdog() {
+    echo "[watchdog] Started (PID $$, interval=${WATCHDOG_INTERVAL}s)" >> "$WATCHDOG_LOG"
+    while true; do
+        killed=0
+        for jid in $(bjobs -r -u ji.cheng4-umw -o "jobid" -noheader 2>/dev/null); do
+            detail=$(bjobs -l "$jid" 2>/dev/null)
+            # Check CPU peak (0.00 = hung) and memory (< 100 MB = idle)
+            cpu=$(echo "$detail" | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{print $2}' | tr -d ' ')
+            mem=$(echo "$detail" | grep "MAX MEM:" | head -1 | awk -F':' '{print $2}' | tr -d ' M')
+            # Check runtime (must be >= 10 min to avoid false positives on fresh jobs)
+            run_sec=$(echo "$detail" | grep "Run time" | head -1 | awk -F':' '{print $2}' | tr -d ' sec.')
+            run_sec=${run_sec:-0}
+            if [ "$cpu" = "0.00" ] && [ -n "$mem" ] && [ "$mem" -lt 100 ] && [ "$run_sec" -ge 600 ] 2>/dev/null; then
+                name=$(bjobs -o "job_name" -noheader "$jid" 2>/dev/null | tr -d ' ')
+                run_min=$((run_sec / 60))
+                echo "[watchdog] $(date '+%H:%M:%S') ZOMBIE: $jid CPU=$cpu MEM=${mem}M RUNTIME=${run_min}m $name -> bkill" >> "$WATCHDOG_LOG"
+                bkill "$jid" 2>/dev/null || true
+                killed=$((killed + 1))
+            fi
+        done
+        [ "$killed" -gt 0 ] && echo "[watchdog] Killed $killed zombie(s) this cycle" >> "$WATCHDOG_LOG"
+        sleep "$WATCHDOG_INTERVAL"
+    done
+}
+
+start_watchdog() {
+    zombie_watchdog &
+    WATCHDOG_PID=$!
+    echo "[watchdog] Launched background watchdog (PID $WATCHDOG_PID)" >> "$WATCHDOG_LOG"
+}
+
+stop_watchdog() {
+    if [ -n "$WATCHDOG_PID" ] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+        echo "[watchdog] Stopped (PID $WATCHDOG_PID)" >> "$WATCHDOG_LOG"
+    fi
+}
+
+# Start the watchdog and ensure it's cleaned up on exit
+start_watchdog
+trap 'stop_watchdog' EXIT
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Helper: run a sliced step (iterates over batch slices)
 # ═══════════════════════════════════════════════════════════════════════════════
 run_sliced_step() {

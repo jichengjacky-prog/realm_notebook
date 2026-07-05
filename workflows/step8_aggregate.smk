@@ -25,8 +25,8 @@ rule all:
 
 
 rule aggregate_results:
-    """Aggregate all per-batch scores, deduplicate by base ligand, and write top-N CSV."""
-    localrule: True
+    """Aggregate all per-batch scores, deduplicate by base ligand, and write top-N CSV.
+    Runs on LSF via bsub because heapq aggregation over all batches is memory-intensive."""
     input:
         expand(os.path.join(TMP_ROOT, "batch_{batch_id}", "scores_round2.csv"),
                batch_id=BATCH_IDS),
@@ -40,6 +40,8 @@ rule aggregate_results:
     resources:
         mem_mb=16000,
         cpus=1,
+        queue=LSF_QUEUE_DEFAULT,
+        walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "aggregate_results.log"),
     shell:
@@ -111,8 +113,8 @@ print(f'Wrote {{len(sorted_results)}} top ligands to {output}')
 
 
 rule cleanup_intermediates:
-    """Remove heavy intermediate files while preserving .done, .csv, and _ready files."""
-    localrule: True
+    """Remove heavy intermediate files while preserving .done, .csv, and _ready files.
+    Runs on LSF via bsub."""
     input:
         top_ligands = TOP_LIGANDS_CSV,
     output:
@@ -121,8 +123,10 @@ rule cleanup_intermediates:
         tmp_root = TMP_ROOT,
         python_bin = PYTHON_BIN,
     resources:
-        mem_mb=500,
+        mem_mb=2000,
         cpus=1,
+        queue=LSF_QUEUE_DEFAULT,
+        walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "cleanup_intermediates.log"),
     shell:

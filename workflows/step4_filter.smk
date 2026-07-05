@@ -24,8 +24,8 @@ rule all:
 
 rule filter_top_round1:
     """Aggregate round-1 scores from all batches, keep top-N ligands via heapq,
-    and clean up round-1 residue directories."""
-    localrule: True
+    and clean up round-1 residue directories.  Runs on LSF via bsub because
+    heapq aggregation over all batches is memory-intensive."""
     input:
         expand(os.path.join(TMP_ROOT, "batch_{batch_id}", "scores_round1.csv"),
                batch_id=BATCH_IDS),
@@ -37,8 +37,10 @@ rule filter_top_round1:
         tmp_root        = TMP_ROOT,
         python_bin      = PYTHON_BIN,
     resources:
-        mem_mb=4000,
+        mem_mb=16000,
         cpus=1,
+        queue=LSF_QUEUE_DEFAULT,
+        walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "filter_top_round1.log"),
     shell:
