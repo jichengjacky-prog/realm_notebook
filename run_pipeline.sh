@@ -96,22 +96,57 @@ zombie_watchdog() {
     echo "[watchdog] Started (PID $$, interval=${WATCHDOG_INTERVAL}s)" >> "$WATCHDOG_LOG"
     while true; do
         killed=0
-        for jid in $(bjobs -r -u ji.cheng4-umw -o "jobid" -noheader 2>/dev/null); do
-            detail=$(bjobs -l "$jid" 2>/dev/null)
-            # Check CPU peak (0.00 = hung) and memory (< 100 MB = idle)
-            cpu=$(echo "$detail" | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{print $2}' | tr -d ' ')
-            mem=$(echo "$detail" | grep "MAX MEM:" | head -1 | awk -F':' '{print $2}' | tr -d ' M')
-            # Check runtime (must be >= 10 min to avoid false positives on fresh jobs)
-            run_sec=$(echo "$detail" | grep "Run time" | head -1 | awk -F':' '{print $2}' | tr -d ' sec.')
-            run_sec=${run_sec:-0}
-            if [ "$cpu" = "0.00" ] && [ -n "$mem" ] && [ "$mem" -lt 100 ] && [ "$run_sec" -ge 600 ] 2>/dev/null; then
-                name=$(bjobs -o "job_name" -noheader "$jid" 2>/dev/null | tr -d ' ')
-                run_min=$((run_sec / 60))
-                echo "[watchdog] $(date '+%H:%M:%S') ZOMBIE: $jid CPU=$cpu MEM=${mem}M RUNTIME=${run_min}m $name -> bkill" >> "$WATCHDOG_LOG"
-                bkill "$jid" 2>/dev/null || true
-                killed=$((killed + 1))
-            fi
-        done
+        # Use bjobs -o for clean, machine-parseable output:
+        #   jobid stat cpu_peak max_mem run_time job_name
+        # Example row:
+        #   927288 RUN 1.02 4.5 Gbytes 6015 second(s) smk_ros1_Z4057430206
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Parse the 6 space-separated fields (max_mem has an embedded space: "4.5 Gbytes")
+            read -r jid stat cpu mem_val mem_unit run_val run_unit jobname \
+                < <(echo "$line" | awk '{
+                    printf "%s %s %s %s %s %s %s",
+                           $1, $2, $3, $4, $5, $6, $7
+                    # job_name is everything from field 8 onward (may contain spaces)
+                    for (i=8; i<=NF; i++) printf " %s", $i
+                    printf "\n"
+                }')
+
+            # Only check RUNning snakemake jobs (job name contains "smk")
+            [ "$stat" != "RUN" ] && continue
+            [[ "$jobname" != *smk* ]] && continue
+
+            # ── Parse runtime (seconds) ──────────────────────────────
+            # run_val is the numeric part, e.g. "6015"
+            run_sec="${run_val:-0}"
+            # Must be >= 10 min (600s) to avoid false positives on freshly started jobs
+            [ "$run_sec" -lt 600 ] 2>/dev/null && continue
+
+            # ── Parse CPU peak ───────────────────────────────────────
+            # cpu is a clean float like "1.02" or "0.00"
+            cpu_idle=$(awk -v c="${cpu:-1.0}" 'BEGIN { print (c+0 <= 0.05) ? 1 : 0 }')
+            [ "$cpu_idle" -ne 1 ] && continue
+
+            # ── Parse memory ─────────────────────────────────────────
+            # mem_val is the numeric part, mem_unit is "Gbytes" or "Mbytes"
+            mem_num="${mem_val:-0}"
+            mem_unit="${mem_unit:-Mbytes}"
+            # Convert to MB for comparison: Gbytes → multiply by 1024
+            mem_mb=0
+            case "$mem_unit" in
+                Gbytes|Gbyte|GB) mem_mb=$(awk -v m="$mem_num" 'BEGIN { printf "%.0f", m * 1024 }') ;;
+                Mbytes|Mbyte|MB|*) mem_mb=$(awk -v m="$mem_num" 'BEGIN { printf "%.0f", m }') ;;
+            esac
+            # Memory must be < 100 MB to qualify as idle/zombie
+            [ "$mem_mb" -ge 100 ] 2>/dev/null && continue
+
+            # ── All conditions met: zombie detected ──────────────────
+            run_min=$((run_sec / 60))
+            echo "[watchdog] $(date '+%H:%M:%S') ZOMBIE: $jid CPU=$cpu MEM=${mem_num}${mem_unit}(${mem_mb}MB) RUNTIME=${run_min}m $jobname -> bkill" >> "$WATCHDOG_LOG"
+            bkill "$jid" 2>/dev/null || true
+            killed=$((killed + 1))
+        done < <(bjobs -r -u ji.cheng4-umw -o "jobid stat cpu_peak max_mem run_time job_name" -noheader 2>/dev/null)
+
         [ "$killed" -gt 0 ] && echo "[watchdog] Killed $killed zombie(s) this cycle" >> "$WATCHDOG_LOG"
         sleep "$WATCHDOG_INTERVAL"
     done

@@ -96,14 +96,6 @@ for base, (score, lig, mr) in seen.items():
 top_ligands = {{lig for _, lig, _, _ in heap}}
 print(f'  Top {{len(top_ligands)}} unique ligands kept from round 1')
 
-# Clean up round-1 residue directories
-for batch_dir in glob.glob(os.path.join('{params.tmp_root}', 'batch_*')):
-    scores_csv = os.path.join(batch_dir, 'scores_round1.csv')
-    if not os.path.exists(scores_csv):
-        continue
-    round1_dir = os.path.join(batch_dir, 'round1')
-    if os.path.isdir(round1_dir):
-        shutil.rmtree(round1_dir, ignore_errors=True)
 
 top_info = {{}}
 for _, lig, score, mr in heap:

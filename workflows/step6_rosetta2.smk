@@ -87,7 +87,7 @@ import sys, os, glob, signal, atexit
 _HARD_TIMEOUT = 11.5 * 3600
 
 def _handle_alarm(signum, frame):
-    print(f'\nFATAL: Hard timeout ({_HARD_TIMEOUT}s) reached — forcing exit', file=sys.stderr)
+    print(f'\\nFATAL: Hard timeout ({{_HARD_TIMEOUT}}s) reached — forcing exit', file=sys.stderr)
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(1)
@@ -194,9 +194,10 @@ PYEOF
                     if [ "$STAT" = "RUN" ]; then
                         STUCK=0
 
-                        # Signal 1: CPU PEAK still at 0.00 (job never started computing)
+                        # Signal 1: CPU PEAK <= 0.05 (job essentially idle)
                         CPU_PEAK=$(bjobs -l "$JID" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
-                        if [ "$CPU_PEAK" = "0.00" ] || [ -z "$CPU_PEAK" ]; then
+                        CPU_IS_IDLE=$(awk -v c="$CPU_PEAK" 'BEGIN {{ print (c+0 <= 0.05) ? 1 : 0 }}')
+                        if [ "$CPU_IS_IDLE" -eq 1 ] || [ -z "$CPU_PEAK" ]; then
                             STUCK=1
                         fi
 
