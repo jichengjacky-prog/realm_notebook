@@ -147,6 +147,8 @@ for residue in '{params.anchor_residues}'.split(','):
 print('Rosetta done for ' + lig_name)
 sys.stdout.flush()
 sys.stderr.flush()
+# Touch marker so watchdog knows job exited cleanly (prevents false-positive zombie kills)
+open(os.path.join(batch_dir, 'round1', lig_name + '.done_pre_exit'), 'w').close()
 # NOTE: alarm intentionally NOT cancelled — if interpreter shutdown hangs
 # (NFS, stuck subprocess), SIGALRM will force os._exit(1) after timeout.
 os._exit(0)
@@ -207,12 +209,24 @@ PYEOF
                             STUCK=1
                         fi
 
-                        # Signal 2: .out file not modified in >30 min (job hung after completing work)
-                        OUT_FILE="$BATCH_DIR/round1/ros1_${{LIG_NAMES[$i]}}.out"
-                        if [ -f "$OUT_FILE" ]; then
-                            OUT_AGE=$(($(date +%s) - $(stat -c %Y "$OUT_FILE" 2>/dev/null || echo 0)))
-                            if [ "$OUT_AGE" -gt 1800 ]; then
-                                STUCK=1
+                        # Signal 2: extract ligand name from job name (fixes $i scoping bug — LIG_NAMES[$i]
+                        # was undefined in the monitoring loop, causing all jobs to be checked
+                        # against the same stale .out file)
+                        LIG_NAME_FROM_JOB=$(bjobs -J "$JID" -noheader 2>/dev/null | sed 's/smk_ros1_//' | tr -d ' ')
+                        DONE_PRE_EXIT="$BATCH_DIR/round1/${{LIG_NAME_FROM_JOB}}.done_pre_exit"
+
+                        # Signal 2a: if .done_pre_exit marker exists, job completed cleanly — don't kill
+                        if [ -f "$DONE_PRE_EXIT" ]; then
+                            STUCK=0
+                            JOB_STUCK_COUNT[$JID]=0
+                        else
+                            # Signal 2b: .out file not modified in >30 min (job hung after completing work)
+                            OUT_FILE="$BATCH_DIR/round1/ros1_${{LIG_NAME_FROM_JOB}}.out"
+                            if [ -f "$OUT_FILE" ]; then
+                                OUT_AGE=$(($(date +%s) - $(stat -c %Y "$OUT_FILE" 2>/dev/null || echo 0)))
+                                if [ "$OUT_AGE" -gt 1800 ]; then
+                                    STUCK=1
+                                fi
                             fi
                         fi
 
