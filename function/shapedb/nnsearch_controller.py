@@ -173,6 +173,10 @@ def submit_chunk_job(chunk, target_molecule_file, working_location, realm_locati
 		working_location,
 		realm_location,
 	]
+	# Optionally pass a custom shapedb SIF path as the 6th argument
+	shapedb_sif = os.environ.get("SIF_SHAPEDB", "")
+	if shapedb_sif:
+		queue_cmd.append(shapedb_sif)
 	cmd_str = " ".join(queue_cmd)
 	print(cmd_str)
 	result = subprocess.run(cmd_str, shell=True, capture_output=True, text=True)

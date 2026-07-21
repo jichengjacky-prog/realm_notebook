@@ -47,6 +47,7 @@ rule rosetta_discovery_round1:
         default_queue   = LSF_QUEUE_DEFAULT,
         rosetta_walltime = LSF_WALLTIME_ROSETTA,
         python_bin      = PYTHON_BIN,
+        sif_rosetta     = SIF_ROSETTA,
     resources:
         load=10,         
         mem_mb=8000,
@@ -85,6 +86,8 @@ rule rosetta_discovery_round1:
             JOB_NAME="smk_ros1_${{LIG_NAME:0:20}}"
             # Write per-ligand Python script to round1/
             SCRIPT="$BATCH_DIR/round1/ros1_$LIG_NAME.py"
+            # Remove any stale .py from prior failed runs to avoid syntax errors
+            rm -f "$SCRIPT"
             cat > "$SCRIPT" << 'PYEOF'
 import sys, os, glob, signal, atexit
 
@@ -124,7 +127,8 @@ for residue in '{params.anchor_residues}'.split(','):
         tp_dir, '{params.discovery_root}',
         '{params.atr}', '{params.rep}', '{params.ddg}',
         extra_args_file='{params.extra_params}' or None,
-        work_dir=res_dir
+        work_dir=res_dir,
+        rosetta_sif='{params.sif_rosetta}'
     )
     if not success:
         pdbs = glob.glob(os.path.join(res_dir, '*.pdb'))

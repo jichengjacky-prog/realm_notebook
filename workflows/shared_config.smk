@@ -37,6 +37,12 @@ LICENSE_KEY     = config.get("license_key",     "")
 WEIGHTS_FILE    = config.get("weights_file") or os.path.join(REALM_LOCATION, "function", "discovery", "score_weights.json")
 TMP_ROOT        = config.get("tmp_root")     or os.path.join(OUTPUT_DIR, "tmp")
 
+# ── SIF (Singularity Image File) paths ───────────────────────────────────
+# Configurable via YAML; fall back to hardcoded defaults under realm_location/sif/
+SIF_ROSETTA     = config.get("sif_rosetta")     or os.path.join(REALM_LOCATION, "sif", "rosetta_condensed_6_29_2026.sif")
+SIF_CONFORMATOR = config.get("sif_conformator") or os.path.join(REALM_LOCATION, "sif", "conformator_container.sif")
+SIF_SHAPEDB     = config.get("sif_shapedb")     or os.path.join(REALM_LOCATION, "sif", "shapedb_container.sif")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TMP_ROOT, exist_ok=True)
 

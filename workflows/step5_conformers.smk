@@ -45,6 +45,7 @@ rule generate_conformers:
         license_key    = LICENSE_KEY,
         tmp_root       = TMP_ROOT,
         python_bin     = PYTHON_BIN,
+        sif_conformator = SIF_CONFORMATOR,
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "generate_conformers.log"),
     shell:
@@ -95,6 +96,8 @@ print(f'Top-N ligands in this batch: {{len(ligands)}}')
             [ -n "$lig_name" ] || continue
             JOB_NAME="smk_genconf_${{lig_name:0:20}}"
             SCRIPT="$BATCH_DIR/genconf_$lig_name.py"
+            # Remove any stale .py from prior failed runs to avoid syntax errors
+            rm -f "$SCRIPT"
             cat > "$SCRIPT" << 'PYEOF'
 import sys, os
 lig_name = sys.argv[1]
@@ -105,6 +108,7 @@ batch_dir = sys.argv[5]
 realm = sys.argv[6]
 enamine = sys.argv[7]
 num_conf = int(sys.argv[8])
+sif_conformer = sys.argv[9] if len(sys.argv) > 9 else None
 
 sys.path.insert(0, os.path.join(realm, 'function/discovery'))
 from utils import create_test_params_dir, generate_and_add_conformers_to_test_params
@@ -115,7 +119,8 @@ create_test_params_dir(
 )
 generate_and_add_conformers_to_test_params(
     batch_dir, [(lig_name, conf_num, chunk, subchunk)], realm, enamine,
-    num_conformers=num_conf, round_name='round2'
+    num_conformers=num_conf, round_name='round2',
+    conformator_sif=sif_conformer
 )
 print(f'Conformers generated for {{lig_name}}')
 PYEOF
@@ -130,7 +135,7 @@ PYEOF
                 {params.python_bin} "$SCRIPT" \
                 "$lig_name" "$conf_num" "$chunk" "$subchunk" \
                 "$BATCH_DIR" '{params.realm_location}' '{params.enamine_path}' \
-                '{params.num_conformers}' 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
+                '{params.num_conformers}' '{params.sif_conformator}' 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
             [ -n "$JOB_ID" ] && JOB_IDS="$JOB_IDS $JOB_ID"
             echo "Submitted $JOB_NAME ($JOB_ID)"
             sleep 0.1

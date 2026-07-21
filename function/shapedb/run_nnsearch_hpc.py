@@ -51,6 +51,11 @@ realm_location = "/pi/summer.thyme-umw/Ji_rosetta_discovery"
 if len(sys.argv) > 4:
 	realm_location = sys.argv[4]
 
+# Optional: custom shapedb SIF path (defaults to realm_location/sif/shapedb_container.sif)
+shapedb_sif = os.path.join(realm_location, "sif", "shapedb_container.sif")
+if len(sys.argv) > 5:
+	shapedb_sif = sys.argv[5]
+
 #move to the working location
 os.chdir(working_location)
 
@@ -71,7 +76,7 @@ try:
 		run_cmd("tar -xzf /pi/summer.thyme-umw/enamine-REAL-2.6billion/" + superchunk_str + "/" + working_chunk + "/condensed_params_and_db_" + str(i) + ".tar.gz condensed_params_and_db_" + str(i) + "/db.db -C .")
 
 		#run shapedb out of the container on the subchunk database, executed via singularity
-		cmd = "singularity exec --bind condensed_params_and_db_" + str(i) + "/db.db:/input/db.db --bind " + target_molecule_file + ":/input/" + target_molecule_name + " " + realm_location + "/sif/shapedb_container.sif /pharmit/src/build/shapedb -NNSearch -k 100000 -ligand /input/" + target_molecule_name + " -db /input/db.db -print > " + working_chunk + "_" + str(i) + "_nn.txt"
+		cmd = "singularity exec --bind condensed_params_and_db_" + str(i) + "/db.db:/input/db.db --bind " + target_molecule_file + ":/input/" + target_molecule_name + " " + shapedb_sif + " /pharmit/src/build/shapedb -NNSearch -k 100000 -ligand /input/" + target_molecule_name + " -db /input/db.db -print > " + working_chunk + "_" + str(i) + "_nn.txt"
 		print(cmd)
 		run_cmd(cmd)
 

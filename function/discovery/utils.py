@@ -145,7 +145,8 @@ def extract_smiles_from_sdf(sdf_file):
 
 def generate_conformers_and_params_cdpkit(ligand_name, smiles, output_dir,
                                           realm_location, num_conformers=150,
-                                          tmp_root=None, work_dir=None):
+                                          tmp_root=None, work_dir=None,
+                                          conformator_sif=None):
     """Generate conformers from SMILES using CDPKit and create Rosetta params files.
 
     Uses CDPKit's ConfGen for conformer generation (no external containers needed).
@@ -159,6 +160,7 @@ def generate_conformers_and_params_cdpkit(ligand_name, smiles, output_dir,
         num_conformers: number of conformers to generate (default 150)
         tmp_root: temp directory root (used if work_dir is None)
         work_dir: explicit working directory (if None, one is created)
+        conformator_sif: path to conformator SIF (default: auto-detected)
 
     Returns:
         list of params file basenames (e.g. ["lig_1.params", "lig_2.params", ...]),
@@ -190,7 +192,8 @@ def generate_conformers_and_params_cdpkit(ligand_name, smiles, output_dir,
             write_cdpkit_conformer_to_sdf(conf_mol, sdf_path)
 
             pf = convert_conformer_to_params(
-                sdf_path, ligand_name, conf_idx, work_dir, realm_location
+                sdf_path, ligand_name, conf_idx, work_dir, realm_location,
+                conformator_sif=conformator_sif
             )
             if not pf:
                 print(f"WARNING: molfile_to_params failed for {ligand_name}_{conf_idx}")
@@ -312,7 +315,8 @@ def create_test_params_dir(ligands_list, batch_dir, realm_location, enamine_path
 
 def generate_and_add_conformers_to_test_params(batch_dir, ligands_list, 
 											   realm_location, enamine_path,
-											   num_conformers=150, tmp_root=None, round_name="round2"):
+											   num_conformers=150, tmp_root=None, round_name="round2",
+											   conformator_sif=None):
 	"""Generate CDPKit conformers and add to per-ligand test_params subdirs.
 	
 	Conformers are placed in:
@@ -365,9 +369,9 @@ def generate_and_add_conformers_to_test_params(batch_dir, ligands_list,
 			new_params = generate_conformers_and_params_cdpkit(
 				ligand_name, smiles, tp_dir, realm_location,
 				num_conformers=num_conformers,
-				tmp_root=tmp_root, work_dir=shared_work_dir
+				tmp_root=tmp_root, work_dir=shared_work_dir,
+				conformator_sif=conformator_sif
 			)
-			
 			if new_params:
 				# Write per-ligand residue_types.txt (idempotent: skip existing entries)
 				res_types_file = os.path.join(tp_dir, "residue_types.txt")
@@ -648,7 +652,7 @@ def fix_params_spacing(params_file, output_dir=None):
 
 
 def convert_conformer_to_params(sdf_path, ligand_name, conf_idx, output_dir,
-                                 realm_location):
+                                 realm_location, conformator_sif=None):
     """Convert an SDF conformer to Rosetta .params using molfile_to_params.py."""
     params_name = f"{ligand_name}_{conf_idx}"
     sdf_abs = os.path.abspath(sdf_path)
@@ -656,7 +660,8 @@ def convert_conformer_to_params(sdf_path, ligand_name, conf_idx, output_dir,
     params_file = os.path.join(output_abs, f"{params_name}.params")
 
     # Run molfile_to_params inside the conformator container (needs rosetta_py)
-    conformator_sif = os.path.join(realm_location, "sif", "conformator_container.sif")
+    if conformator_sif is None:
+        conformator_sif = os.path.join(realm_location, "sif", "conformator_container.sif")
     if os.path.exists(conformator_sif):
         sdf_dir = os.path.dirname(sdf_abs)
         params_cmd = (
@@ -1013,7 +1018,8 @@ def load_residue_index_key(key_file_path):
 
 def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 								  test_params_dir,discovery_root, atr, rep, ddg,
-								  extra_args_file=None, work_dir=None):
+								  extra_args_file=None, work_dir=None,
+								  rosetta_sif=None):
 	"""Run a single Rosetta ligand discovery search.
 
 	Writes a Rosetta args file, executes the search via singularity, and
@@ -1028,6 +1034,7 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 		atr, rep, ddg:          fa_atr, fa_rep, ddg score cutoffs
 		extra_args_file:        optional file with additional Rosetta args
 		work_dir:               working directory (default: current directory)
+		rosetta_sif:            path to Rosetta SIF (default: auto-detected)
 
 	Returns:
 		True on success, False on failure.
@@ -1098,7 +1105,8 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 					args_fh.write(extra_fh.read())
 
 		# Build singularity command
-		rosetta_sif = os.path.join(discovery_root, "sif", "rosetta_condensed_6_25_2024.sif")
+		if rosetta_sif is None:
+			rosetta_sif = os.path.join(discovery_root, "sif", "rosetta_condensed_6_25_2024.sif")
 		rosetta_cmd = " ".join([
 			"singularity exec",
 			"--bind " + test_params_dir + ":/input/test_params/",

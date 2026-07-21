@@ -3,7 +3,7 @@
 Find and remove broken/stale Rosetta log files.
 
 Cleans up three types of broken logs:
-  1. Orphaned ros1_*.out/.err/.py  — where <LIGAND>.done exists (job completed, logs stale)
+  1. ros1_*.out/.err/.py          — all ros1 log/error/script files (removed unconditionally)
   2. Empty rosetta_round1.log      — Snakemake rule logs with 0 bytes (failed batch jobs)
   3. ROSETTA_CRASH.log             — individual Rosetta anchor crash logs
 
@@ -21,7 +21,7 @@ BASE_DIR = "/pi/summer.thyme-umw/Ji_rosetta_discovery"
 
 
 def clean_orphaned_ros1_files(dry_run=True):
-    """Remove orphaned ros1_*.out, ros1_*.err, ros1_*.py where .done exists."""
+    """Remove all ros1_*.out, ros1_*.err, ros1_*.py files (regardless of .done)."""
     total_removed = 0
     total_size_bytes = 0
     batches_affected = 0
@@ -57,16 +57,14 @@ def clean_orphaned_ros1_files(dry_run=True):
                     else:
                         continue
 
-                    done_file = os.path.join(round1_dir, f"{lig_name}.done")
-                    if os.path.exists(done_file):
-                        file_size = os.path.getsize(filepath)
-                        batch_removed += 1
-                        batch_size += file_size
-                        if not dry_run:
-                            try:
-                                os.remove(filepath)
-                            except OSError as e:
-                                print(f"  [ERROR] {filepath}: {e}")
+                    file_size = os.path.getsize(filepath)
+                    batch_removed += 1
+                    batch_size += file_size
+                    if not dry_run:
+                        try:
+                            os.remove(filepath)
+                        except OSError as e:
+                            print(f"  [ERROR] {filepath}: {e}")
 
             if batch_removed > 0:
                 batches_affected += 1
@@ -161,7 +159,7 @@ def main():
         print("=== DRY RUN: Finding broken Rosetta log files ===\n")
 
     # 1. Clean orphaned ros1_* files
-    print("--- Orphaned ros1_*.out/.err/.py (where .done exists) ---")
+    print("--- ros1_*.out/.err/.py files ---")
     n1, s1, b1 = clean_orphaned_ros1_files(dry_run=dry_run)
     print(f"  Total: {n1:,} files, {s1/(1024*1024):.2f} MB, {b1} batches\n")
 
