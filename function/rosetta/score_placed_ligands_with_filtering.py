@@ -184,15 +184,17 @@ def main():
             f"{raw_total:.6f}\n"
         )
 
-        # Write weighted scores
+        # Write weighted scores — individual columns store RAW (unweighted) values
+        # so downstream steps can read the actual metrics (e.g. real_motif_ratio).
+        # Only the 'total' column reflects the weighted combination.
         weighted_fh.write(
             f"{pdb_path},"
-            f"{breakdown['ddg'] * SCORE_WEIGHTS.get('ddg', 1.0):.6f},"
-            f"{breakdown['total_motifs'] * SCORE_WEIGHTS.get('total_motifs', 1.0):.6f},"
-            f"{breakdown['significant_motifs'] * SCORE_WEIGHTS.get('significant_motifs', 1.0):.6f},"
-            f"{breakdown['real_motif_ratio'] * SCORE_WEIGHTS.get('real_motif_ratio', 1.0):.6f},"
-            f"{breakdown['hbond_motif_count'] * SCORE_WEIGHTS.get('hbond_motif_count', 1.0):.6f},"
-            f"{breakdown['hbond_motif_energy_sum'] * SCORE_WEIGHTS.get('hbond_motif_energy_sum', 1.0):.6f},"
+            f"{breakdown['ddg']:.6f},"
+            f"{breakdown['total_motifs']:.6f},"
+            f"{breakdown['significant_motifs']:.6f},"
+            f"{breakdown['real_motif_ratio']:.6f},"
+            f"{breakdown['hbond_motif_count']:.6f},"
+            f"{breakdown['hbond_motif_energy_sum']:.6f},"
             f"{weighted_total:.6f}\n"
         )
 

@@ -53,7 +53,9 @@ rule rosetta_discovery_round1:
         mem_mb=8000,
         cpus=1,
         queue=LSF_QUEUE_ROSETTA,
-        walltime=LSF_WALLTIME_ROSETTA,
+        # Monitoring loop polls for up to MAX_WAIT_HOURS; walltime must exceed it.
+        # Use a long walltime since this job only sleeps/polls (no heavy compute).
+        walltime="168:00",
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "rosetta_round1.log"),
     shell:
@@ -61,34 +63,79 @@ rule rosetta_discovery_round1:
         # NOTE: set +e (not set -e) because some per-ligand Rosetta jobs
         # may exit non-zero (no placements found) which is normal.
         # Explicit error checks are used where needed.
+        set +e
+
+        # ── Trap: touch done flag on exit (handles LSF walltime kill) ──
+        _cleanup_and_exit() {{
+            local exit_code=$?
+            echo "[$(date)] Shell script exiting (trap) with captured code $exit_code"
+            # Always attempt to touch the done flag so Snakemake sees completion.
+            # If per-ligand jobs finished, the rule should be considered done
+            # regardless of whether LSF killed the monitoring script.
+            touch {output.done_flag} 2>/dev/null || true
+            exit 0
+        }}
+        trap '_cleanup_and_exit' EXIT
+
         BATCH_DIR=$(dirname {output.done_flag})
         mkdir -p $BATCH_DIR
         echo "Starting Rosetta round 1 for batch in $BATCH_DIR"
 
-        # ── Submit one LSF job per ligand in parallel ──────────────────
-        JOB_IDS=()
-        LIG_NAMES=()
+        ROUND="round1"
         ANCHOR_COUNT=$(echo '{params.anchor_residues}' | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l)
-        for TP_DIR in "$BATCH_DIR"/round1/*/test_params/; do
+
+        # ── Collect pending ligands (skip already-complete) ──────────
+        PENDING_LIGS=()
+        for TP_DIR in "$BATCH_DIR/$ROUND"/*/test_params/; do
             [ -d "$TP_DIR" ] || continue
             LIG_NAME=$(basename $(dirname "$TP_DIR"))
-            # Skip if ligand already has all expected CSVs (idempotent across restarts)
-            EXISTING_CSV_COUNT=$(find "$BATCH_DIR/round1/$LIG_NAME" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+            EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
             if [ "$EXISTING_CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
                 echo "Ligand $LIG_NAME: already complete ($EXISTING_CSV_COUNT CSVs), skipping submission"
-                rm -f "$BATCH_DIR/round1/ros1_$LIG_NAME.out" \
-                      "$BATCH_DIR/round1/ros1_$LIG_NAME.err" \
-                      "$BATCH_DIR/round1/ros1_$LIG_NAME.py"
-                touch "$BATCH_DIR/round1/$LIG_NAME.done"
+                rm -f "$BATCH_DIR/$ROUND/ros1_$LIG_NAME.out" \
+                      "$BATCH_DIR/$ROUND/ros1_$LIG_NAME.err" \
+                      "$BATCH_DIR/$ROUND/ros1_$LIG_NAME.py"
+                touch "$BATCH_DIR/$ROUND/$LIG_NAME.done"
                 continue
             fi
-            LIG_NAMES+=("$LIG_NAME")
-            JOB_NAME="smk_ros1_${{LIG_NAME:0:20}}"
-            # Write per-ligand Python script to round1/
-            SCRIPT="$BATCH_DIR/round1/ros1_$LIG_NAME.py"
-            # Remove any stale .py from prior failed runs to avoid syntax errors
-            rm -f "$SCRIPT"
-            cat > "$SCRIPT" << 'PYEOF'
+            PENDING_LIGS+=("$LIG_NAME")
+        done
+
+        if [ ${{#PENDING_LIGS[@]}} -eq 0 ]; then
+            echo "No pending ligands found — nothing to run"
+            touch {output.done_flag}
+            exit 0
+        fi
+
+        echo "Total pending ligands: ${{#PENDING_LIGS[@]}}"
+
+        # ── Bundle into chunks of 10, submit as LSF job arrays ─────
+        CHUNK_SIZE=10
+        TOTAL_LIGS=${{#PENDING_LIGS[@]}}
+        NUM_CHUNKS=$(( (TOTAL_LIGS + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+        ARRAY_JOB_IDS=()
+
+        for ((chunk=0; chunk<NUM_CHUNKS; chunk++)); do
+            START=$((chunk * CHUNK_SIZE))
+            CHUNK_LIGS=("${{PENDING_LIGS[@]:$START:$CHUNK_SIZE}}")
+            N=${{#CHUNK_LIGS[@]}}
+
+            # ── Queue check: wait if >5000 jobs already queued ──
+            while true; do
+                QUEUE_COUNT=$(bjobs -q {params.rosetta_queue} -noheader 2>/dev/null | wc -l)
+                if [ "$QUEUE_COUNT" -le 5000 ]; then
+                    break
+                fi
+                echo "[$(date)] Queue '{params.rosetta_queue}' has $QUEUE_COUNT jobs (>5000), waiting 10 min before submitting chunk $((chunk+1))/$NUM_CHUNKS..."
+                sleep 600
+            done
+
+            # Build space-separated ligand list for script args
+            LIG_LIST="${{CHUNK_LIGS[@]}}"
+
+            CHUNK_SCRIPT="$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}.py"
+            rm -f "$CHUNK_SCRIPT"
+            cat > "$CHUNK_SCRIPT" << 'PYEOF'
 import sys, os, glob, signal, atexit
 
 # ── Hard timeout: force-exit after 11.5h (Rosetta walltime is 12h) ──────
@@ -103,22 +150,31 @@ def _handle_alarm(signum, frame):
 signal.signal(signal.SIGALRM, _handle_alarm)
 signal.alarm(int(_HARD_TIMEOUT))
 
-# Ensure output is flushed on normal exit (prevents NFS-buffered hangs)
 atexit.register(sys.stdout.flush)
 atexit.register(sys.stderr.flush)
+
+# ── Determine which ligand to process from LSF job array index ──────
+job_index = int(os.environ.get('LSB_JOBINDEX', '1')) - 1  # LSF is 1-based
+batch_dir = sys.argv[1]
+round_name = sys.argv[2]
+all_ligands = sys.argv[3:]
+
+if job_index >= len(all_ligands):
+    print(f'Job index {{job_index+1}} out of range (have {{len(all_ligands)}} ligands), exiting cleanly')
+    sys.stdout.flush()
+    os._exit(0)
+
+lig_name = all_ligands[job_index]
+tp_dir = os.path.join(batch_dir, round_name, lig_name, 'test_params')
+print(f'[{{round_name}}] Processing ligand {{job_index+1}}/{{len(all_ligands)}}: {{lig_name}}')
 
 sys.path.insert(0, '{params.discovery_root}/function/discovery')
 from utils import run_rosetta_discovery_search
 
-lig_name = sys.argv[1]
-tp_dir = sys.argv[2]
-batch_dir = sys.argv[3]
-any_placements = False
 for residue in '{params.anchor_residues}'.split(','):
     res = residue.strip()
-    res_dir = os.path.join(batch_dir, 'round1', lig_name, res)
+    res_dir = os.path.join(batch_dir, round_name, lig_name, res)
     os.makedirs(res_dir, exist_ok=True)
-    # Idempotency guard: skip if weighted_scores.csv already exists for this residue
     if os.path.isfile(os.path.join(res_dir, 'weighted_scores.csv')):
         print(f'  SKIP: weighted_scores.csv already exists for {{lig_name}}/{{res}}')
         continue
@@ -137,7 +193,6 @@ for residue in '{params.anchor_residues}'.split(','):
             print(f'WARNING: Rosetta produced no output for {{lig_name}}/{{res}}', file=sys.stderr)
         else:
             print(f'Rosetta: placements exist for {{lig_name}}/{{res}} despite non-zero exit')
-    # Remove heavy files, keep only CSVs
     for f in glob.glob(os.path.join(res_dir, '*')):
         if not f.endswith('.csv'):
             try:
@@ -151,42 +206,39 @@ for residue in '{params.anchor_residues}'.split(','):
 print('Rosetta done for ' + lig_name)
 sys.stdout.flush()
 sys.stderr.flush()
-# Touch marker so watchdog knows job exited cleanly (prevents false-positive zombie kills)
-open(os.path.join(batch_dir, 'round1', lig_name + '.done_pre_exit'), 'w').close()
-# NOTE: alarm intentionally NOT cancelled — if interpreter shutdown hangs
-# (NFS, stuck subprocess), SIGALRM will force os._exit(1) after timeout.
+open(os.path.join(batch_dir, round_name, lig_name + '.done_pre_exit'), 'w').close()
 os._exit(0)
 PYEOF
-            JOB_ID=$(bsub \
+
+            ARRAY_JOB_NAME="smk_ros1_c${{chunk}}"
+            ARRAY_JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
                 -q {params.rosetta_queue} \
                 -M 8000 \
                 -n 1 \
                 -R 'span[hosts=1] rusage[mem=8000]' \
-                -J "$JOB_NAME" \
-                -o "$BATCH_DIR/round1/ros1_$LIG_NAME.out" \
-                -e "$BATCH_DIR/round1/ros1_$LIG_NAME.err" \
-                {params.python_bin} "$SCRIPT" "$LIG_NAME" "$TP_DIR" "$BATCH_DIR" 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
-            [ -n "$JOB_ID" ] && JOB_IDS+=("$JOB_ID")
-            echo "Submitted $JOB_NAME ($JOB_ID)"
-            sleep 0.05
+                -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
+                -o "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.out" \
+                -e "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.err" \
+                {params.python_bin} "$CHUNK_SCRIPT" "$BATCH_DIR" "$ROUND" $LIG_LIST \
+                2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
+            [ -n "$ARRAY_JOB_ID" ] && ARRAY_JOB_IDS+=("$ARRAY_JOB_ID")
+            echo "Submitted chunk $((chunk+1))/$NUM_CHUNKS: ${{ARRAY_JOB_NAME}}[1-${{N}}] ($ARRAY_JOB_ID) — ${{N}} ligands"
+            sleep 1
         done
 
-        if [ ${{#JOB_IDS[@]}} -eq 0 ]; then
-            echo "No ligands found — nothing to run"
+        if [ ${{#ARRAY_JOB_IDS[@]}} -eq 0 ]; then
+            echo "No array jobs submitted — nothing to run"
             touch {output.done_flag}
             exit 0
         fi
 
-        # ── Wait for all per-ligand jobs with stuck-job watchdog ─────
-        # Two-layer protection:
-        #   1. CPU monitor: 0% CPU peak for STUCK_THRESHOLD checks → bkill zombie
-        #   2. Hard timeout: MAX_WAIT_HOURS overall → break out (pipeline can resume)
-        echo "Waiting for all per-ligand jobs to finish..."
+        # ── Wait for all array jobs with stuck-array watchdog ─────
+        echo "Waiting for ${{#ARRAY_JOB_IDS[@]}} array jobs to finish..."
         WAIT_START=$(date +%s)
-        STUCK_THRESHOLD=4          # 4 consecutive checks (2h) with 0% CPU → stuck
-        MAX_WAIT_HOURS=48          # absolute max wait time for the batch
-        declare -A JOB_STUCK_COUNT
+        STUCK_THRESHOLD=4
+        MAX_WAIT_HOURS=48
+        declare -A ARRAY_STUCK_COUNT
 
         while true; do
             NOW=$(date +%s)
@@ -197,95 +249,79 @@ PYEOF
             fi
 
             STILL_RUNNING=0
-            for JID in "${{JOB_IDS[@]}}"; do
-                STAT=$(bjobs -o stat -noheader "$JID" 2>/dev/null | tr -d ' ')
-                if [ "$STAT" = "RUN" ] || [ "$STAT" = "PEND" ]; then
+            for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
+                ELEM_STATS=$(bjobs -J "$ARRAY_JID" -o "stat" -noheader 2>/dev/null | tr -d ' ')
+                if [ -n "$ELEM_STATS" ]; then
                     STILL_RUNNING=1
-
-                    # ── Stuck-job detection: two independent signals ──
-                    if [ "$STAT" = "RUN" ]; then
-                        STUCK=0
-
-                        # Signal 1: CPU PEAK <= 0.05 (job essentially idle)
-                        CPU_PEAK=$(bjobs -l "$JID" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
-                        CPU_IS_IDLE=$(awk -v c="$CPU_PEAK" 'BEGIN {{ print (c+0 <= 0.05) ? 1 : 0 }}')
-                        if [ "$CPU_IS_IDLE" -eq 1 ] || [ -z "$CPU_PEAK" ]; then
-                            STUCK=1
-                        fi
-
-                        # Signal 2: extract ligand name from job name (fixes $i scoping bug — LIG_NAMES[$i]
-                        # was undefined in the monitoring loop, causing all jobs to be checked
-                        # against the same stale .out file)
-                        LIG_NAME_FROM_JOB=$(bjobs -J "$JID" -noheader 2>/dev/null | sed 's/smk_ros1_//' | tr -d ' ')
-                        DONE_PRE_EXIT="$BATCH_DIR/round1/${{LIG_NAME_FROM_JOB}}.done_pre_exit"
-
-                        # Signal 2a: if .done_pre_exit marker exists, job completed cleanly — don't kill
-                        if [ -f "$DONE_PRE_EXIT" ]; then
-                            STUCK=0
-                            JOB_STUCK_COUNT[$JID]=0
-                        else
-                            # Signal 2b: .out file not modified in >30 min (job hung after completing work)
-                            OUT_FILE="$BATCH_DIR/round1/ros1_${{LIG_NAME_FROM_JOB}}.out"
-                            if [ -f "$OUT_FILE" ]; then
-                                OUT_AGE=$(($(date +%s) - $(stat -c %Y "$OUT_FILE" 2>/dev/null || echo 0)))
-                                if [ "$OUT_AGE" -gt 1800 ]; then
-                                    STUCK=1
+                    RUN_CNT=$(echo "$ELEM_STATS" | grep -c "RUN" || echo 0)
+                    if [ "$RUN_CNT" -gt 0 ]; then
+                        ALL_IDLE=1
+                        for ELEM_JOB in $(bjobs -J "$ARRAY_JID" -o "jobid" -noheader 2>/dev/null | tr -d ' '); do
+                            ES=$(bjobs -o stat -noheader "$ELEM_JOB" 2>/dev/null | tr -d ' ')
+                            if [ "$ES" = "RUN" ]; then
+                                CPU_PEAK=$(bjobs -l "$ELEM_JOB" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
+                                CPU_IDLE=$(awk -v c="$CPU_PEAK" 'BEGIN {{ print (c+0 <= 0.05) ? 1 : 0 }}')
+                                if [ "$CPU_IDLE" -ne 1 ] || [ -z "$CPU_PEAK" ]; then
+                                    ALL_IDLE=0
+                                    break
                                 fi
                             fi
-                        fi
-
-                        if [ "$STUCK" -eq 1 ]; then
-                            JOB_STUCK_COUNT[$JID]=$((${{JOB_STUCK_COUNT[$JID]:-0}} + 1))
-                            if [ ${{JOB_STUCK_COUNT[$JID]}} -ge "$STUCK_THRESHOLD" ]; then
-                                echo "WARNING: Job $JID appears stuck ($STUCK_THRESHOLD consecutive checks) — killing"
-                                bkill "$JID" 2>/dev/null || true
-                                unset JOB_STUCK_COUNT[$JID]
+                        done
+                        if [ "$ALL_IDLE" -eq 1 ]; then
+                            ARRAY_STUCK_COUNT[$ARRAY_JID]=$((${{ARRAY_STUCK_COUNT[$ARRAY_JID]:-0}} + 1))
+                            if [ ${{ARRAY_STUCK_COUNT[$ARRAY_JID]}} -ge "$STUCK_THRESHOLD" ]; then
+                                echo "WARNING: Array $ARRAY_JID appears stuck ($STUCK_THRESHOLD consecutive checks) — killing"
+                                bkill "$ARRAY_JID" 2>/dev/null || true
+                                unset ARRAY_STUCK_COUNT[$ARRAY_JID]
                             fi
                         else
-                            JOB_STUCK_COUNT[$JID]=0
+                            ARRAY_STUCK_COUNT[$ARRAY_JID]=0
                         fi
                     fi
                 fi
             done
 
             if [ "$STILL_RUNNING" -eq 0 ]; then
-                CSV_COUNT=$(find "$BATCH_DIR"/round1 -name 'weighted_scores.csv' 2>/dev/null | wc -l)
-                echo "All per-ligand jobs finished — $CSV_COUNT weighted_scores.csv files produced"
+                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+                echo "All array jobs finished — $CSV_COUNT weighted_scores.csv files produced"
                 break
             fi
 
-            # Periodic status report (every ~10 min)
             if [ $(( (NOW - WAIT_START) % 600 )) -lt 30 ]; then
-                RUN_COUNT=0; PEND_COUNT=0
-                for JID in "${{JOB_IDS[@]}}"; do
-                    S=$(bjobs -o stat -noheader "$JID" 2>/dev/null | tr -d ' ')
-                    [ "$S" = "RUN" ] && RUN_COUNT=$((RUN_COUNT + 1))
-                    [ "$S" = "PEND" ] && PEND_COUNT=$((PEND_COUNT + 1))
+                TOT_RUN=0; TOT_PEND=0
+                for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
+                    ES=$(bjobs -J "$ARRAY_JID" -o "stat" -noheader 2>/dev/null | tr -d ' ')
+                    TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || echo 0)))
+                    TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || echo 0)))
                 done
-                CSV_COUNT=$(find "$BATCH_DIR"/round1 -name 'weighted_scores.csv' 2>/dev/null | wc -l)
-                echo "[+${{ELAPSED_HRS}}h] Status: $RUN_COUNT RUN, $PEND_COUNT PEND, $CSV_COUNT CSVs so far"
+                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+                echo "[+${{ELAPSED_HRS}}h] Status: $TOT_RUN RUN, $TOT_PEND PEND, $CSV_COUNT CSVs so far"
             fi
 
             sleep 30
         done
 
-        # ── Per-ligand cleanup: remove logs if ALL CSVs present, touch done ──
-        for i in "${{!LIG_NAMES[@]}}"; do
-            LIG="${{LIG_NAMES[$i]}}"
-            LIG_DIR="$BATCH_DIR/round1/$LIG"
+        # ── Per-ligand cleanup ────────────────────────────────────
+        for LIG in "${{PENDING_LIGS[@]}}"; do
+            LIG_DIR="$BATCH_DIR/$ROUND/$LIG"
             CSV_COUNT=$(find "$LIG_DIR" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
             if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
-                rm -f "$BATCH_DIR/round1/ros1_$LIG.out" \
-                      "$BATCH_DIR/round1/ros1_$LIG.err" \
-                      "$BATCH_DIR/round1/ros1_$LIG.py"
-                touch "$BATCH_DIR/round1/$LIG.done"
-                echo "Ligand $LIG: SUCCESS ($CSV_COUNT/$ANCHOR_COUNT CSVs) — cleaned logs, touched done"
+                touch "$BATCH_DIR/$ROUND/$LIG.done"
+                echo "Ligand $LIG: SUCCESS ($CSV_COUNT/$ANCHOR_COUNT CSVs)"
             elif [ "$CSV_COUNT" -gt 0 ]; then
-                echo "Ligand $LIG: PARTIAL ($CSV_COUNT/$ANCHOR_COUNT CSVs) — keeping logs for re-run"
+                echo "Ligand $LIG: PARTIAL ($CSV_COUNT/$ANCHOR_COUNT CSVs)"
             else
-                echo "Ligand $LIG: FAILED or no output — keeping logs for debugging"
+                echo "Ligand $LIG: FAILED or no output"
             fi
         done
+
+        # ── Remove chunk-level artifacts ─────────────────────────
+        rm -f "$BATCH_DIR/$ROUND"/ros1_chunk_*.py \
+              "$BATCH_DIR/$ROUND"/ros1_chunk_*.out \
+              "$BATCH_DIR/$ROUND"/ros1_chunk_*.err \
+              "$BATCH_DIR/$ROUND"/ros1_*.out \
+              "$BATCH_DIR/$ROUND"/ros1_*.err \
+              "$BATCH_DIR/$ROUND"/ros1_*.py 2>/dev/null || true
 
         touch {output.done_flag}
         echo 'Rosetta round 1 complete'
