@@ -10,3 +10,5 @@ test/*
 .vscode/*
 .snakemake/*
 yaml/*
+
+.dsh/

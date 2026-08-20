@@ -53,12 +53,18 @@ PARSE_DONE_FLAG = os.path.join(OUTPUT_DIR, ".parse_shapedb.done")
 os.makedirs(BATCHES_DIR, exist_ok=True)
 
 # ── LSF cluster resource defaults ────────────────────────────────────────
-LSF_QUEUE_ROSETTA    = config.get("lsf_queue_rosetta",    "long")
+# Serial Rosetta compute jobs (the per-chunk arrays) may queue on BOTH the
+# long and short queues: `bsub -q "long short"` submits to the first queue
+# in the list that can take the job. 8h walltime fits both (short = 8h max).
+LSF_QUEUE_ROSETTA    = config.get("lsf_queue_rosetta",    "long short")
 LSF_QUEUE_DEFAULT    = config.get("lsf_queue_default",    "short")
-LSF_WALLTIME_ROSETTA  = config.get("lsf_walltime_rosetta",  "12:00")
+LSF_WALLTIME_ROSETTA  = config.get("lsf_walltime_rosetta",  "8:00")
 LSF_WALLTIME_DEFAULT  = config.get("lsf_walltime_default",  "4:00")
-LSF_QUEUE_BOTH   = config.get("lsf_queue_both",    "\"long short\"")
-LSF_WALLTIME_BOTH =  config.get("lsf_queue_both",    "8:00")
+# Controller/monitor jobs (they submit the Rosetta arrays and then poll for
+# up to 48h) stay on the long queue with a long walltime.
+LSF_QUEUE_MONITOR    = config.get("lsf_queue_monitor",    "long")
+LSF_QUEUE_BOTH   = config.get("lsf_queue_both",    "long short")
+LSF_WALLTIME_BOTH =  config.get("lsf_walltime_both",    "8:00")
 
 # ── Helper: batch file path (sharded into subdirectories) ────────────────
 def batch_file_path(batch_id):

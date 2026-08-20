@@ -1,9 +1,15 @@
 -collect_motifs_from_placed_ligand true
--minimum_motifs_formed_cutoff 6
+
 
 
 -check_if_ligand_motifs_match_real true
+-minimum_motifs_formed_cutoff 6
+
+
+
 -duplicate_dist_cutoff 1.2
 -duplicate_angle_cutoff 0.45
--minimum_ratio_of_real_motifs_from_ligand 0.01
+
 -output_motifs_as_pdb false
+
+-pre_check_proximity_buffer 3.0
