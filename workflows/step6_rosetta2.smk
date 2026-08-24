@@ -61,6 +61,29 @@ rule rosetta_discovery_round2:
         # NOTE: set +e (not set -e) because some per-ligand Rosetta jobs
         # may exit non-zero (no placements found) which is normal.
         # Explicit error checks are used where needed.
+        set +e
+
+        # ── Trap: on ANY exit, reconcile per-ligand .done markers so a
+        # ligand whose raw_scores.csv files are all present is always marked
+        # done (even on early error exits), then log and re-exit. The batch
+        # done flag is NEVER touched here.
+        _cleanup_and_exit() {{
+            local exit_code=$?
+            if [ -n "$BATCH_DIR" ] && [ -n "$ROUND" ] && [ "${{ANCHOR_COUNT:-0}}" -gt 0 ]; then
+                for LIG_DIR in "$BATCH_DIR/$ROUND"/*/; do
+                    [ -d "$LIG_DIR" ] || continue
+                    LIG_NAME=$(basename "$LIG_DIR")
+                    CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ]; then
+                        touch "$BATCH_DIR/$ROUND/$LIG_NAME.done"
+                    fi
+                done
+            fi
+            echo "[$(date)] Shell script exiting (trap) with captured code $exit_code"
+            exit "$exit_code"
+        }}
+        trap '_cleanup_and_exit' EXIT
+
         BATCH_DIR=$(dirname {output.done_flag})
         mkdir -p $BATCH_DIR
         echo "Starting Rosetta round 2 for batch in $BATCH_DIR"
@@ -78,7 +101,7 @@ rule rosetta_discovery_round2:
         for TP_DIR in "$BATCH_DIR/$ROUND"/*/test_params/; do
             [ -d "$TP_DIR" ] || continue
             LIG_NAME=$(basename $(dirname "$TP_DIR"))
-            EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+            EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME" -name 'raw_scores.csv' 2>/dev/null | wc -l)
             if [ "$EXISTING_CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
                 echo "Ligand $LIG_NAME: already complete ($EXISTING_CSV_COUNT CSVs), skipping submission"
                 rm -f "$BATCH_DIR/$ROUND/ros2_$LIG_NAME.out" \
@@ -132,19 +155,7 @@ rule rosetta_discovery_round2:
             CHUNK_SCRIPT="$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}.py"
             rm -f "$CHUNK_SCRIPT"
             cat > "$CHUNK_SCRIPT" << 'PYEOF'
-import sys, os, glob, signal, atexit
-
-# ── Hard timeout: force-exit after 7.5h (Rosetta walltime is 8h) ──────
-_HARD_TIMEOUT = 7.5 * 3600
-
-def _handle_alarm(signum, frame):
-    print(f'\\nFATAL: Hard timeout ({{_HARD_TIMEOUT}}s) reached — forcing exit', file=sys.stderr)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(1)
-
-signal.signal(signal.SIGALRM, _handle_alarm)
-signal.alarm(int(_HARD_TIMEOUT))
+import sys, os, glob, atexit
 
 atexit.register(sys.stdout.flush)
 atexit.register(sys.stderr.flush)
@@ -171,8 +182,8 @@ for residue in '{params.anchor_residues}'.split(','):
     res = residue.strip()
     res_dir = os.path.join(batch_dir, round_name, lig_name, res)
     os.makedirs(res_dir, exist_ok=True)
-    if os.path.isfile(os.path.join(res_dir, 'weighted_scores.csv')):
-        print(f'  SKIP: weighted_scores.csv already exists for {{lig_name}}/{{res}}')
+    if os.path.isfile(os.path.join(res_dir, 'raw_scores.csv')):
+        print(f'  SKIP: raw_scores.csv already exists for {{lig_name}}/{{res}}')
         continue
     success = run_rosetta_discovery_search(
         '{params.target_pdb}', res, '{params.motifs_file}',
@@ -254,10 +265,10 @@ PYEOF
                 # On this cluster `bjobs -J <numeric-id>` matches job NAMES
                 # only and silently returns nothing. Only RUN/PEND/... states
                 # keep the loop alive; DONE elements are not running.
-                # No stuck-array watchdog: the chunk scripts self-terminate
-                # after 7.5h via SIGALRM, so an idle array cannot hang forever,
-                # and the old watchdog's element check compared a multi-line
-                # status against "RUN" and bkilled every healthy array.
+                # No stuck-array watchdog: LSF kills the chunk at its 8h
+                # walltime, so an idle array cannot hang forever, and the old
+                # watchdog's element check compared a multi-line status
+                # against "RUN" and bkilled every healthy array.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
                 if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
@@ -266,8 +277,8 @@ PYEOF
 
             if [ "$STILL_RUNNING" -eq 0 ]; then
                 ALL_FINISHED=1
-                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
-                echo "All array jobs finished — $CSV_COUNT weighted_scores.csv files produced"
+                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                echo "All array jobs finished — $CSV_COUNT raw_scores.csv files produced"
                 break
             fi
 
@@ -278,7 +289,7 @@ PYEOF
                     TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || echo 0)))
                     TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || echo 0)))
                 done
-                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
                 echo "[+${{ELAPSED_HRS}}h] Status: $TOT_RUN RUN, $TOT_PEND PEND, $CSV_COUNT CSVs so far"
             fi
 
@@ -294,7 +305,7 @@ PYEOF
         # ── Per-ligand cleanup ────────────────────────────────────
         for LIG in "${{PENDING_LIGS[@]}}"; do
             LIG_DIR="$BATCH_DIR/$ROUND/$LIG"
-            CSV_COUNT=$(find "$LIG_DIR" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+            CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
             if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
                 touch "$BATCH_DIR/$ROUND/$LIG.done"
                 echo "Ligand $LIG: SUCCESS ($CSV_COUNT/$ANCHOR_COUNT CSVs)"
@@ -314,7 +325,7 @@ PYEOF
               "$BATCH_DIR/$ROUND"/ros2_*.py 2>/dev/null || true
 
         # ── Verify completion before declaring the batch done ─────
-        # Residue dirs that already have a weighted_scores.csv are skipped
+        # Residue dirs that already have a raw_scores.csv are skipped
         # (never recomputed, never required again). A batch is done when
         # every pending ligand's chunk finished — i.e. a fresh
         # <lig>.done_pre_exit exists — because the chunk script runs Rosetta
@@ -331,8 +342,8 @@ PYEOF
             echo "ERROR: $MISSING_LIGS/${{#PENDING_LIGS[@]}} pending ligand chunk(s) did not finish — NOT marking batch done"
             exit 1
         fi
-        CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
-        echo "All ${{#PENDING_LIGS[@]}} pending ligand chunks finished — $CSV_COUNT weighted_scores.csv total (res dirs without placements are normal and skipped)"
+        CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+        echo "All ${{#PENDING_LIGS[@]}} pending ligand chunks finished — $CSV_COUNT raw_scores.csv total (res dirs without placements are normal and skipped)"
 
         touch {output.done_flag}
         echo 'Rosetta round 2 complete'

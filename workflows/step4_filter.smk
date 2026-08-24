@@ -107,4 +107,13 @@ with open('{output.top_list}', 'w') as fh:
         fh.write(f'{{lig}},{{score:.6f}},{{mr:.6f}}\\n')
 print(f'  Wrote {{len(top_info)}} top ligands to {output.top_list}')
 " > {log} 2>&1
+
+        # round1/ dirs (weighted_scores.csv) are no longer needed once the
+        # top ligand list is written. Delete them ONLY here, after step 4 —
+        # nothing earlier in the pipeline may remove CSVs.
+        if [ -s {output.top_list} ]; then
+            rm -rf "{params.tmp_root}"/batch_*/round1
+        else
+            echo "WARNING: top list empty — keeping round1 data"
+        fi
         """

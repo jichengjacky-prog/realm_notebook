@@ -1016,6 +1016,36 @@ def load_residue_index_key(key_file_path):
 # Rosetta ligand discovery search
 # ---------------------------------------------------------------------------
 
+# Header of the weighted_scores.csv files written by
+# score_placed_ligands_with_filtering.py (one row per placement PDB).
+_SCORES_CSV_HEADER = ("file,ddg,total_motifs,significant_motifs,"
+					  "real_motif_ratio,hbond_motif_count,"
+					  "hbond_motif_energy_sum,total\n")
+
+
+def write_empty_scores_marker(work_dir):
+	"""Write a header-only weighted_scores.csv in work_dir to mark a residue
+	dir as attempted with no placements (Rosetta found nothing).
+
+	This keeps batch CSV counts consistent: every residue that was attempted
+	has a weighted_scores.csv, so count-based checks (clean_false_done_flags,
+	controller verification) no longer mistake 'no placements' for 'not run'.
+	Header-only files yield zero rows for downstream parsers (csv.DictReader,
+	score_placements), so they are safe.
+
+	Returns True if written, False if one already existed or on error."""
+	path = os.path.join(work_dir, "weighted_scores.csv")
+	if os.path.isfile(path):
+		return False
+	try:
+		with open(path, "w") as fh:
+			fh.write(_SCORES_CSV_HEADER)
+		return True
+	except OSError as e:
+		print(f"WARNING: could not write empty scores marker {path}: {e}")
+		return False
+
+
 def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 								  test_params_dir,discovery_root, atr, rep, ddg,
 								  extra_args_file=None, work_dir=None,
@@ -1055,9 +1085,12 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 		orig_cwd = None
 
 	try:
-		# Idempotency guard: skip if output already exists from a previous run
-		if work_dir and os.path.isfile(os.path.join(work_dir, "weighted_scores.csv")):
-			print(f"SKIP: weighted_scores.csv already exists in {work_dir} — Rosetta already completed")
+		# Idempotency guard: skip only if real scores exist from a previous run.
+		# raw_scores.csv is only written after successful placement scoring;
+		# the header-only weighted_scores.csv marker (written on crashes) must
+		# NOT count as completion so crashed anchors are retried.
+		if work_dir and os.path.isfile(os.path.join(work_dir, "raw_scores.csv")):
+			print(f"SKIP: raw_scores.csv already exists in {work_dir} — Rosetta already completed")
 			return True
 		if work_dir and os.path.isfile(os.path.join(work_dir, "placements.tar.gz")):
 			print(f"SKIP: placements.tar.gz already exists in {work_dir} — Rosetta already completed")
@@ -1106,7 +1139,7 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 
 		# Build singularity command
 		if rosetta_sif is None:
-			rosetta_sif = os.path.join(discovery_root, "sif", "rosetta_condensed_6_25_2024.sif")
+			rosetta_sif = os.path.join(discovery_root, "sif", "rosetta_condensed_8_24_2026.sif")
 		rosetta_cmd = " ".join([
 			"singularity exec",
 			"--bind " + test_params_dir + ":/input/test_params/",
@@ -1124,6 +1157,10 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 
 		if rosetta_result != 0:
 			print("ERROR: Rosetta discovery search failed")
+			# No placements found: mark this residue dir as attempted with an
+			# empty (header-only) weighted_scores.csv so CSV-count checks stay
+			# consistent and re-runs skip it.
+			write_empty_scores_marker(os.getcwd())
 			return False
 
 		# Post-processing: organize placements
@@ -1155,6 +1192,11 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 		dehydrate_script = os.path.join(discovery_root, "function", "tidying",
 										"shrink_placement_pdbs_to_placement_and_surrounding_residues.py")
 		run_cmd("python " + dehydrate_script + " " + target_pdb)
+
+		# If scoring produced no CSV (no placements found), write an empty
+		# marker so this residue dir still counts as attempted.
+		if not os.path.isfile("weighted_scores.csv"):
+			write_empty_scores_marker(os.getcwd())
 
 		print("Rosetta discovery search complete.")
 		return True

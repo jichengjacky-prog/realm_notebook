@@ -94,11 +94,10 @@ with open('{output.scores_csv}', 'w', newline='') as fh:
 print(f'Scored {{len(best)}} unique ligands (from {{len(scores)}} placements)')
 " > {log} 2>&1
 
-        # Only clean up round1 if scores CSV was successfully written (idempotent guard)
-        if [ -s {output.scores_csv} ]; then
-            rm -rf "$BATCH_DIR"/round1
-            rm -f "$BATCH_DIR"/rosetta_round1.log
-        else
+        # round1/ weighted_scores.csv files are intentionally KEPT here:
+        # nothing may delete CSVs before step 4. Cleanup happens in
+        # step4_filter.smk once top_ligands_round1.txt is written.
+        if [ ! -s {output.scores_csv} ]; then
             echo "WARNING: scores_round1.csv is empty — keeping round1 data for debugging"
         fi
         """
