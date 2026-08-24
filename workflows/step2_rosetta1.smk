@@ -106,6 +106,9 @@ rule rosetta_discovery_round1:
                 continue
             fi
             PENDING_LIGS+=("$LIG_NAME")
+            # Remove any stale completion marker from an earlier attempt so
+            # the final check only sees chunks that finished THIS run.
+            rm -f "$BATCH_DIR/$ROUND/$LIG_NAME.done_pre_exit"
         done
 
         if [ ${{#PENDING_LIGS[@]}} -eq 0 ]; then
@@ -249,13 +252,11 @@ PYEOF
             exit 1
         fi
 
-        # ── Wait for all array jobs with stuck-array watchdog ─────
+        # ── Wait for all array jobs ────────────────────────────────
         echo "Waiting for ${{#ARRAY_JOB_IDS[@]}} array jobs to finish..."
         WAIT_START=$(date +%s)
-        STUCK_THRESHOLD=4
         MAX_WAIT_HOURS=48
         ALL_FINISHED=0
-        declare -A ARRAY_STUCK_COUNT
 
         while true; do
             NOW=$(date +%s)
@@ -269,38 +270,15 @@ PYEOF
             for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
                 # NOTE: query by positional job id (bjobs <id>), NOT -J.
                 # On this cluster `bjobs -J <numeric-id>` matches job NAMES
-                # only and silently returns nothing, which made the wait loop
-                # exit immediately and delete chunk scripts that were still
-                # queued. Only RUN/PEND/... states keep the loop alive; DONE
-                # elements are not considered running.
+                # only and silently returns nothing. Only RUN/PEND/... states
+                # keep the loop alive; DONE elements are not running.
+                # No stuck-array watchdog: the chunk scripts self-terminate
+                # after 7.5h via SIGALRM, so an idle array cannot hang forever,
+                # and the old watchdog's element check compared a multi-line
+                # status against "RUN" and bkilled every healthy array.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
                 if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
-                    RUN_CNT=$(echo "$ELEM_STATS" | grep -c "RUN" || echo 0)
-                    if [ "$RUN_CNT" -gt 0 ]; then
-                        ALL_IDLE=1
-                        for ELEM_JOB in $(bjobs -o "jobid" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' '); do
-                            ES=$(bjobs -o stat -noheader "$ELEM_JOB" 2>/dev/null | tr -d ' ')
-                            if [ "$ES" = "RUN" ]; then
-                                CPU_PEAK=$(bjobs -l "$ELEM_JOB" 2>/dev/null | grep "CPU PEAK:" | head -1 | awk -F'[:;]' '{{print $2}}' | tr -d ' ')
-                                CPU_IDLE=$(awk -v c="$CPU_PEAK" 'BEGIN {{ print (c+0 <= 0.05) ? 1 : 0 }}')
-                                if [ "$CPU_IDLE" -ne 1 ] || [ -z "$CPU_PEAK" ]; then
-                                    ALL_IDLE=0
-                                    break
-                                fi
-                            fi
-                        done
-                        if [ "$ALL_IDLE" -eq 1 ]; then
-                            ARRAY_STUCK_COUNT[$ARRAY_JID]=$((${{ARRAY_STUCK_COUNT[$ARRAY_JID]:-0}} + 1))
-                            if [ ${{ARRAY_STUCK_COUNT[$ARRAY_JID]}} -ge "$STUCK_THRESHOLD" ]; then
-                                echo "WARNING: Array $ARRAY_JID appears stuck ($STUCK_THRESHOLD consecutive checks) — killing"
-                                bkill "$ARRAY_JID" 2>/dev/null || true
-                                unset ARRAY_STUCK_COUNT[$ARRAY_JID]
-                            fi
-                        else
-                            ARRAY_STUCK_COUNT[$ARRAY_JID]=0
-                        fi
-                    fi
                 fi
             done
 
@@ -314,7 +292,7 @@ PYEOF
             if [ $(( (NOW - WAIT_START) % 600 )) -lt 30 ]; then
                 TOT_RUN=0; TOT_PEND=0
                 for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
-                    ES=$(bjobs -J "$ARRAY_JID" -o "stat" -noheader 2>/dev/null | tr -d ' ')
+                    ES=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
                     TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || echo 0)))
                     TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || echo 0)))
                 done
@@ -353,17 +331,26 @@ PYEOF
               "$BATCH_DIR/$ROUND"/ros1_*.err \
               "$BATCH_DIR/$ROUND"/ros1_*.py 2>/dev/null || true
 
-        # ── Verify CSV count before declaring the batch done ─────
-        # Every pending ligand must have a weighted_scores.csv for each
-        # anchor residue; otherwise do NOT create the done flag so Snakemake
-        # will re-process the batch on the next run.
-        CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
-        EXPECTED_CSVS=$(( ${{#PENDING_LIGS[@]}} * ANCHOR_COUNT ))
-        if [ "$CSV_COUNT" -lt "$EXPECTED_CSVS" ]; then
-            echo "ERROR: only $CSV_COUNT weighted_scores.csv found, expected at least $EXPECTED_CSVS (${{#PENDING_LIGS[@]}} pending ligands x $ANCHOR_COUNT anchors) — NOT marking batch done"
+        # ── Verify completion before declaring the batch done ─────
+        # Residue dirs that already have a weighted_scores.csv are skipped
+        # (never recomputed, never required again). A batch is done when
+        # every pending ligand's chunk finished — i.e. a fresh
+        # <lig>.done_pre_exit exists — because the chunk script runs Rosetta
+        # for EVERY anchor of the ligand; anchors where Rosetta found no
+        # placements simply produce no CSV, which is a normal outcome.
+        MISSING_LIGS=0
+        for LIG in "${{PENDING_LIGS[@]}}"; do
+            if [ ! -f "$BATCH_DIR/$ROUND/$LIG.done_pre_exit" ]; then
+                echo "ERROR: ligand $LIG chunk did not finish (no fresh .done_pre_exit)"
+                MISSING_LIGS=$((MISSING_LIGS + 1))
+            fi
+        done
+        if [ "$MISSING_LIGS" -gt 0 ]; then
+            echo "ERROR: $MISSING_LIGS/${{#PENDING_LIGS[@]}} pending ligand chunk(s) did not finish — NOT marking batch done"
             exit 1
         fi
-        echo "CSV count OK: $CSV_COUNT >= $EXPECTED_CSVS"
+        CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'weighted_scores.csv' 2>/dev/null | wc -l)
+        echo "All ${{#PENDING_LIGS[@]}} pending ligand chunks finished — $CSV_COUNT weighted_scores.csv total (res dirs without placements are normal and skipped)"
 
         touch {output.done_flag}
         echo 'Rosetta round 1 complete'

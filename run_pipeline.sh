@@ -91,6 +91,11 @@ echo ""
 WATCHDOG_PID=""
 WATCHDOG_INTERVAL=600  # 10 minutes between checks
 WATCHDOG_LOG="$OUTPUT_DIR/.zombie_watchdog.log"
+# A job must be idle for at least this long (seconds) before it is killed.
+# Controllers are polling processes (~0 CPU, <100 MB) that legitimately sit
+# idle for a long time while their arrays are queued/running, so be tolerant:
+# default = 1 hour of no output before bkill. Override via env var.
+WATCHDOG_MIN_RUN_SEC="${WATCHDOG_MIN_RUN_SEC:-3600}"
 
 zombie_watchdog() {
     echo "[watchdog] Started (PID $$, interval=${WATCHDOG_INTERVAL}s)" >> "$WATCHDOG_LOG"
@@ -119,8 +124,10 @@ zombie_watchdog() {
             # ── Parse runtime (seconds) ──────────────────────────────
             # run_val is the numeric part, e.g. "6015"
             run_sec="${run_val:-0}"
-            # Must be >= 10 min (600s) to avoid false positives on freshly started jobs
-            [ "$run_sec" -lt 600 ] 2>/dev/null && continue
+            # Must be idle >= WATCHDOG_MIN_RUN_SEC (default 1h) to avoid
+            # false positives on freshly started jobs AND on controllers
+            # that are legitimately waiting on their arrays.
+            [ "$run_sec" -lt "$WATCHDOG_MIN_RUN_SEC" ] 2>/dev/null && continue
 
             # ── Parse CPU peak ───────────────────────────────────────
             # cpu is a clean float like "1.02" or "0.00"
