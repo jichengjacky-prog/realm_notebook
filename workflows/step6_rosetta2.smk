@@ -46,6 +46,7 @@ rule rosetta_discovery_round2:
         rosetta_walltime = LSF_WALLTIME_ROSETTA,
         python_bin      = PYTHON_BIN,
         sif_rosetta     = SIF_ROSETTA,
+        batches_dir     = BATCHES_DIR,
     resources:
         load=10,
         mem_mb=500,
@@ -63,17 +64,27 @@ rule rosetta_discovery_round2:
         # Explicit error checks are used where needed.
         set +e
 
+        BEST_ANCHOR_MAP=""   # derived below; trap may run before it is set
+
         # ── Trap: on ANY exit, reconcile per-ligand .done markers so a
-        # ligand whose raw_scores.csv files are all present is always marked
-        # done (even on early error exits), then log and re-exit. The batch
-        # done flag is NEVER touched here.
+        # ligand whose raw_scores.csv is present for its mapped target res
+        # (or any res when no map) is always marked done — even on early
+        # error exits. The batch done flag is NEVER touched here.
         _cleanup_and_exit() {{
             local exit_code=$?
             if [ -n "$BATCH_DIR" ] && [ -n "$ROUND" ] && [ "${{ANCHOR_COUNT:-0}}" -gt 0 ]; then
                 for LIG_DIR in "$BATCH_DIR/$ROUND"/*/; do
                     [ -d "$LIG_DIR" ] || continue
                     LIG_NAME=$(basename "$LIG_DIR")
-                    CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    # When a best-anchor map is available, only the mapped
+                    # (target) res counts; stale CSVs from older full-anchor
+                    # runs must not satisfy completion.
+                    LIG_TARGET=$(printf '%s\\n' "$BEST_ANCHOR_MAP" 2>/dev/null | grep -m1 "^$LIG_NAME," | cut -d, -f2)
+                    if [ -n "$LIG_TARGET" ]; then
+                        CSV_COUNT=$(find "$LIG_DIR/$LIG_TARGET" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    else
+                        CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    fi
                     if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ]; then
                         touch "$BATCH_DIR/$ROUND/$LIG_NAME.done"
                     fi
@@ -94,16 +105,75 @@ rule rosetta_discovery_round2:
         rm -f {output.done_flag}
 
         ROUND="round2"
-        ANCHOR_COUNT=$(echo '{params.anchor_residues}' | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l)
+        # Round 2 targets ONLY each ligand's round-1 best-score anchor, so a
+        # ligand is complete once ONE raw_scores.csv exists (its target res).
+        ANCHOR_COUNT=1
+
+        # ── Derive the round-1 best-anchor map from step3 + step4 ──
+        # The ligand set comes from step4 (top_ligands_round1.txt, already
+        # materialized as round2 test_params by step5).  The best anchor per
+        # ligand comes from step3's per-batch scores_round1.csv: its
+        # 'ligand' column holds the best round-1 placement name, which
+        # embeds the residue ("res<N>_<receptor>_<ligand>_<conf>_<idx>").
+        # Map lines are "ligand,res"; missing/unparseable rows → the ligand
+        # falls back to the full anchor list (old behavior) with a warning.
+        BEST_ANCHOR_MAP=""
+        if [ -s "$BATCH_DIR/scores_round1.csv" ]; then
+            BEST_ANCHOR_MAP=$({params.python_bin} -c "
+import csv, re, sys, os
+batch_id = int(sys.argv[2])
+batch_file = os.path.join(sys.argv[3], '%04d' % (batch_id // 1000), 'batch_%d.txt' % batch_id)
+batch_ligands = []
+if os.path.isfile(batch_file):
+    with open(batch_file) as fh:
+        for line in fh:
+            parts = line.strip().split(',')
+            if parts:
+                batch_ligands.append(parts[0])
+out = {{}}
+with open(os.path.join(sys.argv[1], 'scores_round1.csv')) as fh:
+    for row in csv.DictReader(fh):
+        placement = (row.get('ligand') or '').strip()
+        m = re.match(r'res(\d+)_', placement)
+        if not m:
+            continue
+        base = placement
+        for lig in sorted(batch_ligands, key=len, reverse=True):
+            if lig in placement:
+                base = lig
+                break
+        out[base] = m.group(1)
+for base, res in out.items():
+    print('%s,%s' % (base, res))
+" "$BATCH_DIR" '{wildcards.batch_id}' '{params.batches_dir}' 2>/dev/null)
+        fi
+        if [ -z "$BEST_ANCHOR_MAP" ]; then
+            echo "WARNING: no best-anchor map derivable from $BATCH_DIR/scores_round1.csv — round 2 will run ALL anchors for every ligand"
+        else
+            echo "Best-anchor map derived from scores_round1.csv: $(printf '%s\n' "$BEST_ANCHOR_MAP" | wc -l) ligand(s)"
+        fi
 
         # ── Collect pending ligands (skip already-complete) ──────────
         PENDING_LIGS=()
         for TP_DIR in "$BATCH_DIR/$ROUND"/*/test_params/; do
             [ -d "$TP_DIR" ] || continue
             LIG_NAME=$(basename $(dirname "$TP_DIR"))
-            EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            # Only the round-1 best-score anchor is targeted in round 2, so a
+            # ligand counts as complete once raw_scores.csv exists for THAT
+            # anchor.  No mapping row → old behavior (count across all res
+            # dirs, which are also skipped one by one by the chunk script).
+            TARGET_RES=$(printf '%s\\n' "$BEST_ANCHOR_MAP" | grep -m1 "^$LIG_NAME," | cut -d, -f2)
+            if [ -n "$TARGET_RES" ]; then
+                EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME/$TARGET_RES" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            else
+                EXISTING_CSV_COUNT=$(find "$BATCH_DIR/$ROUND/$LIG_NAME" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            fi
             if [ "$EXISTING_CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
-                echo "Ligand $LIG_NAME: already complete ($EXISTING_CSV_COUNT CSVs), skipping submission"
+                if [ -n "$TARGET_RES" ]; then
+                    echo "Ligand $LIG_NAME: already complete (target res $TARGET_RES has $EXISTING_CSV_COUNT CSVs), skipping submission"
+                else
+                    echo "Ligand $LIG_NAME: already complete ($EXISTING_CSV_COUNT CSVs), skipping submission"
+                fi
                 rm -f "$BATCH_DIR/$ROUND/ros2_$LIG_NAME.out" \
                       "$BATCH_DIR/$ROUND/ros2_$LIG_NAME.err" \
                       "$BATCH_DIR/$ROUND/ros2_$LIG_NAME.py"
@@ -152,6 +222,18 @@ rule rosetta_discovery_round2:
             # Build space-separated ligand list for script args
             LIG_LIST="${{CHUNK_LIGS[@]}}"
 
+            # Per-chunk residue map (ligand,target_residue): round 2 runs ONLY
+            # each ligand's round-1 best-score anchor.  "ALL" = fallback (no
+            # mapping row) → the chunk script runs the full anchor list.
+            RES_MAP_FILE="$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_residues.txt"
+            : > "$RES_MAP_FILE"
+            for LIG in "${{CHUNK_LIGS[@]}}"; do
+                TARGET_RES=$(printf '%s\\n' "$BEST_ANCHOR_MAP" | grep -m1 "^$LIG," | cut -d, -f2)
+                [ -z "$TARGET_RES" ] && TARGET_RES="ALL"
+                echo "$LIG,$TARGET_RES" >> "$RES_MAP_FILE"
+            done
+            echo "Chunk $((chunk+1))/$NUM_CHUNKS residue map: $(wc -l < "$RES_MAP_FILE") ligands, $(grep -c ',ALL$' "$RES_MAP_FILE" || true) without mapping (will run all anchors)"
+
             CHUNK_SCRIPT="$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}.py"
             rm -f "$CHUNK_SCRIPT"
             cat > "$CHUNK_SCRIPT" << 'PYEOF'
@@ -164,7 +246,8 @@ atexit.register(sys.stderr.flush)
 job_index = int(os.environ.get('LSB_JOBINDEX', '1')) - 1  # LSF is 1-based
 batch_dir = sys.argv[1]
 round_name = sys.argv[2]
-all_ligands = sys.argv[3:]
+res_map_file = sys.argv[-1]
+all_ligands = sys.argv[3:-1]
 
 if job_index >= len(all_ligands):
     print(f'Job index {{job_index+1}} out of range (have {{len(all_ligands)}} ligands), exiting cleanly')
@@ -178,7 +261,29 @@ print(f'[{{round_name}}] Processing ligand {{job_index+1}}/{{len(all_ligands)}}:
 sys.path.insert(0, '{params.discovery_root}/function/discovery')
 from utils import run_rosetta_discovery_search
 
-for residue in '{params.anchor_residues}'.split(','):
+# ── Round 2 runs ONLY the round-1 best-score anchor for this ligand ──
+# (map derived by the controller from step3's scores_round1.csv: placement
+# names embed the residue, "res<N>_...").  "ALL" fallback → run the full
+# anchor list, matching the pre-best-anchor behavior.
+target_res = 'ALL'
+try:
+    with open(res_map_file, 'r') as fh:
+        for line in fh:
+            parts = line.strip().split(',')
+            if len(parts) >= 2 and parts[0] == lig_name:
+                target_res = parts[1]
+                break
+except Exception as e:
+    print(f'  WARNING: cannot read residue map {{res_map_file}}: {{e}} — running all anchors')
+
+if target_res == 'ALL':
+    residues = '{params.anchor_residues}'.split(',')
+    print(f'  WARNING: no best-anchor mapping for {{lig_name}} — running ALL anchors')
+else:
+    residues = [target_res]
+    print(f'  Round-1 best anchor for {{lig_name}}: {{target_res}} — round 2 runs only there')
+
+for residue in residues:
     res = residue.strip()
     res_dir = os.path.join(batch_dir, round_name, lig_name, res)
     os.makedirs(res_dir, exist_ok=True)
@@ -233,7 +338,7 @@ PYEOF
                 -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
                 -o "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.out" \
                 -e "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.err" \
-                {params.python_bin} "$CHUNK_SCRIPT" "$BATCH_DIR" "$ROUND" $LIG_LIST \
+                {params.python_bin} "$CHUNK_SCRIPT" "$BATCH_DIR" "$ROUND" $LIG_LIST "$RES_MAP_FILE" \
                 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
             [ -n "$ARRAY_JOB_ID" ] && ARRAY_JOB_IDS+=("$ARRAY_JOB_ID")
             echo "Submitted chunk $((chunk+1))/$NUM_CHUNKS: ${{ARRAY_JOB_NAME}}[1-${{N}}] ($ARRAY_JOB_ID) on queue $CHUNK_Q — ${{N}} ligands"
@@ -250,6 +355,7 @@ PYEOF
         WAIT_START=$(date +%s)
         MAX_WAIT_HOURS=48
         ALL_FINISHED=0
+        CLEAN_CHECK=0
 
         while true; do
             NOW=$(date +%s)
@@ -270,24 +376,39 @@ PYEOF
                 # watchdog's element check compared a multi-line status
                 # against "RUN" and bkilled every healthy array.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
+                if [ -z "$ELEM_STATS" ]; then
+                    # bjobs returned nothing (transient query failure while the
+                    # cluster is saturated) — unknown is NOT finished, keep waiting.
+                    STILL_RUNNING=1
+                elif echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
                 fi
             done
 
             if [ "$STILL_RUNNING" -eq 0 ]; then
-                ALL_FINISHED=1
-                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
-                echo "All array jobs finished — $CSV_COUNT raw_scores.csv files produced"
-                break
+                # Require two consecutive "all finished" readings (30 s apart) so a
+                # transient bjobs glitch cannot end the wait while arrays are PEND.
+                CLEAN_CHECK=$((CLEAN_CHECK + 1))
+                if [ "$CLEAN_CHECK" -ge 2 ]; then
+                    ALL_FINISHED=1
+                    CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    echo "All array jobs finished — $CSV_COUNT raw_scores.csv files produced"
+                    break
+                fi
+            else
+                CLEAN_CHECK=0
             fi
 
             if [ $(( (NOW - WAIT_START) % 600 )) -lt 30 ]; then
                 TOT_RUN=0; TOT_PEND=0
                 for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
                     ES=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                    TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || echo 0)))
-                    TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || echo 0)))
+                    # NOTE: `|| true` (NOT `|| echo 0`): grep -c already prints
+                    # "0" when nothing matches; `|| echo 0` prints a second "0",
+                    # and the resulting "0\\n0" makes $(( )) throw an arithmetic
+                    # error, which makes bash abort the whole wait loop early.
+                    TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || true)))
+                    TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || true)))
                 done
                 CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
                 echo "[+${{ELAPSED_HRS}}h] Status: $TOT_RUN RUN, $TOT_PEND PEND, $CSV_COUNT CSVs so far"
@@ -305,7 +426,15 @@ PYEOF
         # ── Per-ligand cleanup ────────────────────────────────────
         for LIG in "${{PENDING_LIGS[@]}}"; do
             LIG_DIR="$BATCH_DIR/$ROUND/$LIG"
-            CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            # Count only the mapped (target) res when a best-anchor map is
+            # available; stale CSVs from older full-anchor runs must not
+            # satisfy completion.
+            LIG_TARGET=$(printf '%s\\n' "$BEST_ANCHOR_MAP" | grep -m1 "^$LIG," | cut -d, -f2)
+            if [ -n "$LIG_TARGET" ]; then
+                CSV_COUNT=$(find "$LIG_DIR/$LIG_TARGET" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            else
+                CSV_COUNT=$(find "$LIG_DIR" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+            fi
             if [ "$CSV_COUNT" -ge "$ANCHOR_COUNT" ] && [ "$ANCHOR_COUNT" -gt 0 ]; then
                 touch "$BATCH_DIR/$ROUND/$LIG.done"
                 echo "Ligand $LIG: SUCCESS ($CSV_COUNT/$ANCHOR_COUNT CSVs)"
@@ -320,6 +449,7 @@ PYEOF
         rm -f "$BATCH_DIR/$ROUND"/ros2_chunk_*.py \
               "$BATCH_DIR/$ROUND"/ros2_chunk_*.out \
               "$BATCH_DIR/$ROUND"/ros2_chunk_*.err \
+              "$BATCH_DIR/$ROUND"/ros2_chunk_*_residues.txt \
               "$BATCH_DIR/$ROUND"/ros2_*.out \
               "$BATCH_DIR/$ROUND"/ros2_*.err \
               "$BATCH_DIR/$ROUND"/ros2_*.py 2>/dev/null || true
@@ -329,8 +459,9 @@ PYEOF
         # (never recomputed, never required again). A batch is done when
         # every pending ligand's chunk finished — i.e. a fresh
         # <lig>.done_pre_exit exists — because the chunk script runs Rosetta
-        # for EVERY anchor of the ligand; anchors where Rosetta found no
-        # placements simply produce no CSV, which is a normal outcome.
+        # at the ligand's round-1 best-score anchor only; anchors where
+        # Rosetta found no placements simply produce no CSV, which is a
+        # normal outcome.
         MISSING_LIGS=0
         for LIG in "${{PENDING_LIGS[@]}}"; do
             if [ ! -f "$BATCH_DIR/$ROUND/$LIG.done_pre_exit" ]; then

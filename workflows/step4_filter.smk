@@ -1,6 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 4: Filter top-N hits from round 1 → top_ligands_round1.txt
 #
+# Reads the per-placement raw_scores.csv files directly from the round1
+# residue dirs (no step-3 scores_round1.csv required) and NEVER deletes
+# any round1 data — temporary results are kept for inspection/reruns.
+#
 # Run:  snakemake -s workflows/step4_filter.smk \
 #           --configfile yaml/config_state3.yaml
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -10,8 +14,8 @@ import os
 configfile: "config.yaml"
 include: "shared_config.smk"
 
-# ── Discover batches from step 3 output ──────────────────────────────────
-BATCH_IDS, = glob_wildcards(os.path.join(TMP_ROOT, "batch_{batch_id}", "scores_round1.csv"))
+# ── Discover batches from step 1 output ──────────────────────────────────
+BATCH_IDS, = glob_wildcards(os.path.join(TMP_ROOT, "batch_{batch_id}", ".round1_ready"))
 BATCH_IDS = sorted(BATCH_IDS, key=int)
 
 
@@ -23,11 +27,11 @@ rule all:
 
 
 rule filter_top_round1:
-    """Aggregate round-1 scores from all batches, keep top-N ligands via heapq,
-    and clean up round-1 residue directories.  Runs on LSF via bsub because
-    heapq aggregation over all batches is memory-intensive."""
+    """Aggregate round-1 raw_scores.csv files from all batches, keep top-N
+    ligands via heapq.  Runs on LSF via bsub because heapq aggregation over
+    all batches is memory-intensive.  Does NOT delete any round1 data."""
     input:
-        expand(os.path.join(TMP_ROOT, "batch_{batch_id}", "scores_round1.csv"),
+        expand(os.path.join(TMP_ROOT, "batch_{batch_id}", ".round1_ready"),
                batch_id=BATCH_IDS),
     output:
         top_list = os.path.join(OUTPUT_DIR, "top_ligands_round1.txt"),
@@ -47,7 +51,7 @@ rule filter_top_round1:
         """
         set -e
         {params.python_bin} -c "
-import heapq, csv, shutil, glob, os
+import heapq, csv, glob, os
 
 output_dir = os.path.dirname(os.path.dirname('{params.tmp_root}'))
 batches_dir = os.path.join(output_dir, 'batches')
@@ -67,23 +71,43 @@ def get_base_ligand_global(placement_name):
     for lig in sorted(batch_ligands_global, key=len, reverse=True):
         if lig in placement_name:
             return lig
-    return '_'.join(placement_name.split('_')[:-1])
+    # Fallback: placement_name is already the canonical ligand name (the
+    # path segment right after round1/), so keep it as-is.  The old
+    # '_'.join(name.split('_')[:-1]) hack returned '' for names without
+    # underscores and merged unrelated ligands into one base.
+    return placement_name
 
+# ── Collect from raw_scores.csv (per-placement rows) ─────────────────────
+# raw_scores.csv lives at batch_<id>/round1/<ligand>/<anchor>/raw_scores.csv.
+# Header-only files (105 bytes, zero placements) contribute no rows.
+# score = 'total' column == -ddg with the default weights {{ddg: -1.0}}.
 seen = {{}}
-for sf in glob.glob(os.path.join('{params.tmp_root}', 'batch_*', 'scores_round1.csv')):
+n_rows = 0
+n_files = 0
+for sf in glob.glob(os.path.join('{params.tmp_root}', 'batch_*', 'round1', '*', '*', 'raw_scores.csv')):
     if not os.path.exists(sf):
         continue
+    n_files += 1
+    # ligand name is the path segment right after round1/
+    lig = sf.split('/round1/')[-1].split('/')[0]
     with open(sf, 'r') as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            lig = row['ligand']
-            score = float(row['score'])
-            mr = float(row['real_motif_ratio'])
+            if not row.get('file'):
+                continue  # header-only marker, no placements
+            try:
+                score = float(row['total'])
+                mr = float(row['real_motif_ratio'])
+            except (KeyError, ValueError):
+                continue
             if mr <= {params.min_motif_ratio}:
                 continue
+            n_rows += 1
             base = get_base_ligand_global(lig)
             if base not in seen or score > seen[base][0]:
                 seen[base] = (score, lig, mr)
+
+print(f'  Read {{n_rows}} placement rows from {{n_files}} raw_scores.csv files across all batches')
 
 heap = []
 for base, (score, lig, mr) in seen.items():
@@ -106,14 +130,15 @@ with open('{output.top_list}', 'w') as fh:
         score, mr = top_info[lig]
         fh.write(f'{{lig}},{{score:.6f}},{{mr:.6f}}\\n')
 print(f'  Wrote {{len(top_info)}} top ligands to {output.top_list}')
+
+# NOTE: the round-1 best anchor per ligand is NOT recorded here; step6
+# derives it from step3's scores_round1.csv (placement names embed the
+# residue, "res<N>_..."), keeping step4's output to the single top list.
 " > {log} 2>&1
 
-        # round1/ dirs (weighted_scores.csv) are no longer needed once the
-        # top ligand list is written. Delete them ONLY here, after step 4 —
-        # nothing earlier in the pipeline may remove CSVs.
-        if [ -s {output.top_list} ]; then
-            rm -rf "{params.tmp_root}"/batch_*/round1
-        else
-            echo "WARNING: top list empty — keeping round1 data"
+        # NOTE: round1/ temporary data is intentionally KEPT — nothing is
+        # deleted by this step. Remove it manually once results are finalized.
+        if [ ! -s {output.top_list} ]; then
+            echo "WARNING: top list empty — check that raw_scores.csv files exist under tmp/batch_*/round1/*/*/"
         fi
         """

@@ -260,6 +260,7 @@ PYEOF
         WAIT_START=$(date +%s)
         MAX_WAIT_HOURS=48
         ALL_FINISHED=0
+        CLEAN_CHECK=0
 
         while true; do
             NOW=$(date +%s)
@@ -280,24 +281,39 @@ PYEOF
                 # watchdog's element check compared a multi-line status
                 # against "RUN" and bkilled every healthy array.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
+                if [ -z "$ELEM_STATS" ]; then
+                    # bjobs returned nothing (transient query failure while the
+                    # cluster is saturated) — unknown is NOT finished, keep waiting.
+                    STILL_RUNNING=1
+                elif echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
                 fi
             done
 
             if [ "$STILL_RUNNING" -eq 0 ]; then
-                ALL_FINISHED=1
-                CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
-                echo "All array jobs finished — $CSV_COUNT raw_scores.csv files produced"
-                break
+                # Require two consecutive "all finished" readings (30 s apart) so a
+                # transient bjobs glitch cannot end the wait while arrays are PEND.
+                CLEAN_CHECK=$((CLEAN_CHECK + 1))
+                if [ "$CLEAN_CHECK" -ge 2 ]; then
+                    ALL_FINISHED=1
+                    CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
+                    echo "All array jobs finished — $CSV_COUNT raw_scores.csv files produced"
+                    break
+                fi
+            else
+                CLEAN_CHECK=0
             fi
 
             if [ $(( (NOW - WAIT_START) % 600 )) -lt 30 ]; then
                 TOT_RUN=0; TOT_PEND=0
                 for ARRAY_JID in "${{ARRAY_JOB_IDS[@]}}"; do
                     ES=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                    TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || echo 0)))
-                    TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || echo 0)))
+                    # NOTE: `|| true` (NOT `|| echo 0`): grep -c already prints
+                    # "0" when nothing matches; `|| echo 0` prints a second "0",
+                    # and the resulting "0\\n0" makes $(( )) throw an arithmetic
+                    # error, which makes bash abort the whole wait loop early.
+                    TOT_RUN=$((TOT_RUN + $(echo "$ES" | grep -c "RUN" || true)))
+                    TOT_PEND=$((TOT_PEND + $(echo "$ES" | grep -c "PEND" || true)))
                 done
                 CSV_COUNT=$(find "$BATCH_DIR/$ROUND" -name 'raw_scores.csv' 2>/dev/null | wc -l)
                 echo "[+${{ELAPSED_HRS}}h] Status: $TOT_RUN RUN, $TOT_PEND PEND, $CSV_COUNT CSVs so far"
