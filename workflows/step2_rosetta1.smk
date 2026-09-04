@@ -186,7 +186,13 @@ tp_dir = os.path.join(batch_dir, round_name, lig_name, 'test_params')
 print(f'[{{round_name}}] Processing ligand {{job_index+1}}/{{len(all_ligands)}}: {{lig_name}}')
 
 sys.path.insert(0, '{params.discovery_root}/function/discovery')
-from utils import run_rosetta_discovery_search
+from utils import cache_file_on_node, release_node_cached_files, run_rosetta_discovery_search
+atexit.register(release_node_cached_files)
+
+# Stage shared, immutable Rosetta inputs once per compute node so array
+# elements on that node avoid repeatedly reading them from NFS.
+local_rosetta_sif = cache_file_on_node('{params.sif_rosetta}')
+local_motifs_file = cache_file_on_node('{params.motifs_file}')
 
 for residue in '{params.anchor_residues}'.split(','):
     res = residue.strip()
@@ -196,12 +202,12 @@ for residue in '{params.anchor_residues}'.split(','):
         print(f'  SKIP: raw_scores.csv already exists for {{lig_name}}/{{res}}')
         continue
     success = run_rosetta_discovery_search(
-        '{params.target_pdb}', res, '{params.motifs_file}',
+        '{params.target_pdb}', res, local_motifs_file,
         tp_dir, '{params.discovery_root}',
         '{params.atr}', '{params.rep}', '{params.ddg}',
         extra_args_file='{params.extra_params}' or None,
         work_dir=res_dir,
-        rosetta_sif='{params.sif_rosetta}'
+        rosetta_sif=local_rosetta_sif
     )
     if not success:
         pdbs = glob.glob(os.path.join(res_dir, '*.pdb'))
@@ -221,25 +227,47 @@ for residue in '{params.anchor_residues}'.split(','):
                 pass
 
 print('Rosetta done for ' + lig_name)
+release_node_cached_files()
 sys.stdout.flush()
 sys.stderr.flush()
 open(os.path.join(batch_dir, round_name, lig_name + '.done_pre_exit'), 'w').close()
 os._exit(0)
 PYEOF
 
-            # ── Controller decides this chunk's queue: alternate between
-            # the queues in {params.rosetta_queue} ("long short") so roughly
-            # half the Rosetta work lands on each queue.
+            # ── Select the configured queue with the fewest pending jobs
+            # owned by this controller's LSF user. Re-query before every
+            # submission so new array elements affect the next decision.
             QLIST=({params.rosetta_queue})
-            CHUNK_Q="${{QLIST[$(( chunk % ${{#QLIST[@]}} ))]}}"
+            CHUNK_Q=""
+            LOWEST_PENDING=""
+            for Q in "${{QLIST[@]}}"; do
+                Q_JOB_IDS=$(bjobs -p -q "$Q" -o "jobid" -noheader 2>/dev/null)
+                Q_QUERY_STATUS=$?
+                if [ "$Q_QUERY_STATUS" -eq 0 ]; then
+                    Q_PENDING=$(printf '%s\n' "$Q_JOB_IDS" | sed '/^[[:space:]]*$/d' | wc -l)
+                    echo "Queue $Q: $Q_PENDING of my jobs pending"
+                    if [ -z "$LOWEST_PENDING" ] || [ "$Q_PENDING" -lt "$LOWEST_PENDING" ]; then
+                        CHUNK_Q="$Q"
+                        LOWEST_PENDING="$Q_PENDING"
+                    fi
+                else
+                    echo "WARNING: could not read my pending jobs for queue $Q"
+                fi
+            done
+            if [ -z "$CHUNK_Q" ]; then
+                CHUNK_Q="${{QLIST[0]}}"
+                echo "WARNING: no per-user queue data available; falling back to $CHUNK_Q"
+            else
+                echo "Selected queue $CHUNK_Q for chunk $((chunk+1))/$NUM_CHUNKS ($LOWEST_PENDING pending)"
+            fi
 
             ARRAY_JOB_NAME="smk_ros1_c${{chunk}}"
             ARRAY_JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
                 -q "$CHUNK_Q" \
-                -M 6000 \
+                -M 1500 \
                 -n 1 \
-                -R 'span[hosts=1] rusage[mem=6000]' \
+                -R 'span[hosts=1] rusage[mem=1500]' \
                 -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
                 -o "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.out" \
                 -e "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.err" \
@@ -276,16 +304,15 @@ PYEOF
                 # On this cluster `bjobs -J <numeric-id>` matches job NAMES
                 # only and silently returns nothing. Only RUN/PEND/... states
                 # keep the loop alive; DONE elements are not running.
-                # No stuck-array watchdog: LSF kills the chunk at its 8h
-                # walltime, so an idle array cannot hang forever, and the old
-                # watchdog's element check compared a multi-line status
-                # against "RUN" and bkilled every healthy array.
+                # `bjobs` without `-a` reports only active array elements. Once
+                # every element is DONE/EXIT (or has aged out of mbatchd), it
+                # returns no status rows. Therefore empty output means this
+                # array has no live elements; it must not keep the controller
+                # waiting forever. Two clean polls below guard against a
+                # transient empty response, and the final .done_pre_exit check
+                # prevents a query glitch from marking incomplete work done.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                if [ -z "$ELEM_STATS" ]; then
-                    # bjobs returned nothing (transient query failure while the
-                    # cluster is saturated) — unknown is NOT finished, keep waiting.
-                    STILL_RUNNING=1
-                elif echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
+                if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
                 fi
             done

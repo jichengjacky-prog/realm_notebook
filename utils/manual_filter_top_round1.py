@@ -5,9 +5,12 @@ manual_filter_top_round1.py — manual stand-in for workflows/step4_filter.smk
 
 Aggregates the per-placement raw_scores.csv files under
     <tmp_root>/batch_*/round1/<ligand>/<anchor>/raw_scores.csv
-and writes the top-N ligand list in the same format the pipeline uses
-(ligand,score,real_motif_ratio).  Nothing is deleted — round1 temporary
-results are left untouched.
+and writes the top-N ligand list.  Every raw_scores.csv column is kept
+(file, ddg, total_motifs, significant_motifs, real_motif_ratio,
+hbond_motif_count, hbond_motif_energy_sum, total) and ligands are ranked
+by ddg (most negative = best binding, ascending).  Placements below
+--min-motif-ratio are filtered out.  Nothing is deleted — round1
+temporary results are left untouched.
 
 Batches are processed in parallel (one worker thread per batch; --workers
 controls the pool size) and a progress monitor prints the remaining queue
@@ -33,7 +36,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REALM = os.path.dirname(os.path.dirname(HERE))  # utils -> realm root
+REALM = os.path.dirname(HERE)  # utils/ is directly under the realm root
+
+# Columns of raw_scores.csv, in header order (written by
+# function/rosetta/score_placed_ligands_with_filtering.py).
+RAW_COLUMNS = [
+    "file",
+    "ddg",
+    "total_motifs",
+    "significant_motifs",
+    "real_motif_ratio",
+    "hbond_motif_count",
+    "hbond_motif_energy_sum",
+    "total",
+]
 
 
 def discover_batches_dir(tmp_root):
@@ -79,12 +95,13 @@ def get_base_ligand_global(placement_name, batch_ligands_global, sorted_ligands=
 def process_batch(batch_dir, min_motif_ratio, batch_ligands_global, sorted_ligands=None):
     """Aggregate one batch's round1 raw_scores.csv files.
 
-    Returns (seen, n_rows, n_files) where seen maps base ligand →
-    (score, lig, mr) — the best qualifying placement of that batch.
+    Returns (seen, n_rows, n_files) where seen maps base ligand → the best
+    qualifying placement row of that batch (dict of all raw_scores.csv
+    columns plus "ligand" and "_ddg").  "Best" = most negative ddg (best
+    binding).
 
-    score is the 'total' column of each placement row
-    (== -ddg with the default weights {ddg: -1.0}); header-only files
-    (zero placements) contribute no rows.
+    Only rows with real_motif_ratio > min_motif_ratio qualify; header-only
+    files (zero placements) contribute no rows.
 
     Implementation notes (this is the hot path — it was 60x slower with
     glob.glob('round1/*/*/raw_scores.csv'), which expands 3 wildcard
@@ -128,7 +145,7 @@ def process_batch(batch_dir, min_motif_ratio, batch_ligands_global, sorted_ligan
                         if not row.get("file"):
                             continue  # header-only marker, no placements
                         try:
-                            score = float(row["total"])
+                            ddg = float(row["ddg"])
                             mr = float(row["real_motif_ratio"])
                         except (KeyError, ValueError):
                             continue
@@ -136,34 +153,49 @@ def process_batch(batch_dir, min_motif_ratio, batch_ligands_global, sorted_ligan
                             continue
                         n_rows += 1
                         base = get_base_ligand_global(lig, batch_ligands_global, sorted_ligands)
-                        if base not in seen or score > seen[base][0]:
-                            seen[base] = (score, lig, mr)
+                        # Best placement per base = most negative ddg.
+                        if base not in seen or ddg < seen[base]["_ddg"]:
+                            entry = {col: row.get(col, "") for col in RAW_COLUMNS}
+                            entry["ligand"] = lig
+                            entry["_ddg"] = ddg
+                            seen[base] = entry
             except OSError as e:
                 print(f"WARNING: cannot read {sf}: {e}", file=sys.stderr)
     return seen, n_rows, n_files
 
 
 def keep_top_n(seen, max_ligands):
-    heap = []
-    for base, (score, lig, mr) in seen.items():
-        entry = (-score, lig, score, mr)
-        if len(heap) < max_ligands:
-            heapq.heappush(heap, entry)
-        elif score > -heap[0][0]:
-            heapq.heapreplace(heap, entry)
-    return heap
+    """Return the max_ligands bases with the most negative ddg, as a list
+    of (ddg, base, row) tuples sorted ascending by ddg (best first)."""
+    entries = [(row["_ddg"], base, row) for base, row in seen.items()]
+    return heapq.nsmallest(max_ligands, entries, key=lambda e: (e[0], e[1]))
 
 
-def write_top_list(heap, out_path):
-    top_info = {}
-    for _, lig, score, mr in heap:
-        top_info[lig] = (score, mr)
+def write_top_list(entries, out_path):
+    """Write header 'ligand' + all raw_scores.csv columns, one row per top ligand."""
+    header = ["ligand"] + RAW_COLUMNS
     with open(out_path, "w") as fh:
-        fh.write("ligand,score,real_motif_ratio\n")
-        for lig in sorted(top_info.keys()):
-            score, mr = top_info[lig]
-            fh.write(f"{lig},{score:.6f},{mr:.6f}\n")
-    return len(top_info)
+        fh.write(",".join(header) + "\n")
+        for ddg, base, row in entries:
+            # First column = the round1 dir name (same convention as step4's
+            # top_ligands_round1.txt, which step5 matches against).
+            fields = [row.get("ligand", base)]
+            for col in RAW_COLUMNS:
+                val = row.get(col, "")
+                if col == "file":
+                    fields.append(val)
+                elif col == "hbond_motif_count":
+                    try:
+                        fields.append(str(int(float(val))))
+                    except (TypeError, ValueError):
+                        fields.append(val)
+                else:
+                    try:
+                        fields.append(f"{float(val):.6f}")
+                    except (TypeError, ValueError):
+                        fields.append(val)
+            fh.write(",".join(fields) + "\n")
+    return len(entries)
 
 
 def _batch_sort_key(path):
@@ -292,9 +324,9 @@ def main():
             return
         n_rows += batch_rows
         n_files += batch_files
-        for base, entry in batch_seen.items():
-            if base not in seen or entry[0] > seen[base][0]:
-                seen[base] = entry
+        for base, row in batch_seen.items():
+            if base not in seen or row["_ddg"] < seen[base]["_ddg"]:
+                seen[base] = row
         state["finished"] += 1
         state["rows"] = n_rows
         state["n_files"] = n_files
@@ -331,13 +363,17 @@ def main():
         print("WARNING: no qualifying placements found — nothing to write")
         sys.exit(0)
 
-    heap = keep_top_n(seen, args.max_ligands)
-    n_top = write_top_list(heap, out_path)
+    entries = keep_top_n(seen, args.max_ligands)
+    n_top = write_top_list(entries, out_path)
     print(f"wrote {n_top} top ligands to {out_path}")
 
-    print("\nTop ligands:")
-    for _, lig, score, mr in sorted(heap, key=lambda e: -e[2]):
-        print(f"  {lig}: score={score:.6f} real_motif_ratio={mr:.6f}")
+    print("\nTop ligands (ranked by ddg, most negative = best):")
+    for ddg, base, row in entries:
+        print(
+            f"  {base}: ddg={ddg:.6f} "
+            f"real_motif_ratio={row.get('real_motif_ratio', '')} "
+            f"total_motifs={row.get('total_motifs', '')}"
+        )
 
 
 if __name__ == "__main__":

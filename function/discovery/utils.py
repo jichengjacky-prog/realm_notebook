@@ -27,6 +27,151 @@ except Exception:
     ConfGen = None
 
 
+_NODE_CACHE_LEASES = {}
+
+
+def _register_node_cache_lease(cached_path):
+	"""Record that this process is actively using a node-local cache file."""
+	lease_path = f"{cached_path}.lease.{os.getpid()}"
+	with open(lease_path, "w") as lease_fh:
+		lease_fh.write(
+			f"job={os.environ.get('LSB_JOBID', '')} "
+			f"index={os.environ.get('LSB_JOBINDEX', '')} "
+			f"pid={os.getpid()}\n"
+		)
+	_NODE_CACHE_LEASES[cached_path] = lease_path
+	return cached_path
+
+
+def release_node_cached_files():
+	"""Release this process's leases and remove cache files no longer in use.
+
+	Lock files are intentionally retained because removing an actively opened
+	lock pathname can create two independent locks. They are tiny and the node's
+	standard ``/tmp`` policy removes them later.
+	"""
+	import fcntl
+
+	for cached_path, own_lease in list(_NODE_CACHE_LEASES.items()):
+		cache_dir = os.path.dirname(cached_path)
+		lock_path = cached_path + ".lock"
+		try:
+			with open(lock_path, "a") as lock_fh:
+				fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+				try:
+					os.remove(own_lease)
+				except OSError:
+					pass
+
+				lease_prefix = os.path.basename(cached_path) + ".lease."
+				active_leases = []
+				for entry in os.listdir(cache_dir):
+					if not entry.startswith(lease_prefix):
+						continue
+					lease_path = os.path.join(cache_dir, entry)
+					try:
+						lease_pid = int(entry[len(lease_prefix):])
+					except ValueError:
+						active_leases.append(lease_path)
+						continue
+					if os.path.exists(f"/proc/{lease_pid}"):
+						active_leases.append(lease_path)
+					else:
+						try:
+							os.remove(lease_path)
+						except OSError:
+							pass
+
+				if not active_leases and os.path.isfile(cached_path):
+					os.remove(cached_path)
+					print(f"Removed unused node-local cache: {cached_path}")
+		except OSError as exc:
+			print(
+				f"WARNING: could not release node-local cache {cached_path}: {exc}",
+				file=sys.stderr,
+			)
+		finally:
+			_NODE_CACHE_LEASES.pop(cached_path, None)
+
+
+def cache_file_on_node(source_path, cache_dir=None):
+	"""Copy an immutable shared file to node-local ``/tmp`` once.
+
+	Concurrent jobs on the same node coordinate with ``flock`` and reuse the
+	completed copy. The source size and nanosecond mtime are included in the
+	cache name, so replacing a source file automatically creates a new cache
+	entry. If staging fails (for example, because local scratch is full), the
+	shared source path is returned so the caller can continue normally.
+	"""
+	import fcntl
+
+	source_path = os.path.realpath(os.path.abspath(source_path))
+	tmp_path = None
+	try:
+		source_stat = os.stat(source_path)
+		if not os.path.isfile(source_path):
+			raise OSError(f"not a regular file: {source_path}")
+
+		if cache_dir is None:
+			cache_dir = os.path.join(
+				"/tmp", f"rosetta_reference_cache_{os.getuid()}"
+			)
+		os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+
+		cache_key = f"{source_stat.st_size:x}-{source_stat.st_mtime_ns:x}"
+		cached_path = os.path.join(
+			cache_dir, f"{os.path.basename(source_path)}.{cache_key}"
+		)
+		lock_path = cached_path + ".lock"
+
+		with open(lock_path, "a") as lock_fh:
+			fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+
+			# A task killed during copy can leave a large partial file. Once this
+			# lock is held, no valid writer for this cache key is still active.
+			tmp_prefix = os.path.basename(cached_path) + ".tmp."
+			for entry in os.listdir(cache_dir):
+				if entry.startswith(tmp_prefix):
+					try:
+						os.remove(os.path.join(cache_dir, entry))
+					except OSError:
+						pass
+
+			if (os.path.isfile(cached_path)
+					and os.path.getsize(cached_path) == source_stat.st_size):
+				print(f"Using node-local cache: {cached_path}")
+				return _register_node_cache_lease(cached_path)
+
+			free_bytes = shutil.disk_usage(cache_dir).free
+			reserve_bytes = max(256 * 1024 * 1024, source_stat.st_size // 20)
+			if free_bytes < source_stat.st_size + reserve_bytes:
+				raise OSError("insufficient node-local disk space")
+
+			tmp_path = f"{cached_path}.tmp.{os.getpid()}"
+			print(f"Staging {source_path} to node-local cache {cached_path}")
+			shutil.copyfile(source_path, tmp_path)
+			if os.path.getsize(tmp_path) != source_stat.st_size:
+				raise OSError("node-local copy has the wrong size")
+			os.chmod(tmp_path, 0o600)
+			os.replace(tmp_path, cached_path)
+			tmp_path = None
+			print(f"Node-local cache ready: {cached_path}")
+			return _register_node_cache_lease(cached_path)
+	except (OSError, IOError) as exc:
+		print(
+			f"WARNING: could not stage {source_path} in node-local /tmp: "
+			f"{exc}; using shared path",
+			file=sys.stderr,
+		)
+		return source_path
+	finally:
+		if tmp_path:
+			try:
+				os.remove(tmp_path)
+			except OSError:
+				pass
+
+
 # ── CDPKit conformer generation (inline, no cross-module imports) ──────────
 
 def generate_cdpkit_conformers(smiles, num_conformers):

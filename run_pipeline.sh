@@ -353,7 +353,7 @@ fi
 run_sliced_step 2 "rosetta_round1" \
     "step2_rosetta1.smk" \
     "$STEP2_DONE" \
-    "--resources load=20"
+    "--resources load=40"
 
 run_sliced_step 3 "score_round1" \
     "step3_score1.smk" \
@@ -373,7 +373,7 @@ run_sliced_step 5 "generate_conformers" \
 run_sliced_step 6 "rosetta_round2" \
     "step6_rosetta2.smk" \
     "$STEP6_DONE" \
-    "--resources load=20"
+    "--resources load=40"
 
 run_sliced_step 7 "score_round2" \
     "step7_score2.smk" \

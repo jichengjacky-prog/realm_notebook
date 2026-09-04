@@ -237,7 +237,7 @@ for base, res in out.items():
             CHUNK_SCRIPT="$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}.py"
             rm -f "$CHUNK_SCRIPT"
             cat > "$CHUNK_SCRIPT" << 'PYEOF'
-import sys, os, glob, atexit
+import sys, os, glob, atexit, csv, shutil, tarfile
 
 atexit.register(sys.stdout.flush)
 atexit.register(sys.stderr.flush)
@@ -259,7 +259,68 @@ tp_dir = os.path.join(batch_dir, round_name, lig_name, 'test_params')
 print(f'[{{round_name}}] Processing ligand {{job_index+1}}/{{len(all_ligands)}}: {{lig_name}}')
 
 sys.path.insert(0, '{params.discovery_root}/function/discovery')
-from utils import run_rosetta_discovery_search
+from utils import cache_file_on_node, release_node_cached_files, run_rosetta_discovery_search
+atexit.register(release_node_cached_files)
+
+# Stage shared, immutable Rosetta inputs once per compute node so array
+# elements on that node avoid repeatedly reading them from NFS.
+local_rosetta_sif = cache_file_on_node('{params.sif_rosetta}')
+local_motifs_file = cache_file_on_node('{params.motifs_file}')
+
+
+def keep_best_scoring_pdb(res_dir):
+    '''Extract only the highest-weighted placement PDB from Rosetta's archive.'''
+    scores_path = os.path.join(res_dir, 'weighted_scores.csv')
+    archive_path = os.path.join(res_dir, 'placements.tar.gz')
+    if not os.path.isfile(scores_path) or not os.path.isfile(archive_path):
+        return None
+
+    best_row = None
+    best_score = None
+    try:
+        with open(scores_path, newline='') as scores_fh:
+            for row in csv.DictReader(scores_fh):
+                try:
+                    score = float(row.get('total', ''))
+                except (TypeError, ValueError):
+                    continue
+                if best_score is None or score > best_score:
+                    best_row = row
+                    best_score = score
+
+        if best_row is None:
+            print('  No scored pose to retain in ' + scores_path)
+            return None
+
+        pdb_name = os.path.basename(best_row.get('file', ''))
+        if not pdb_name.endswith('.pdb'):
+            print('  WARNING: best score row has no valid PDB filename', file=sys.stderr)
+            return None
+
+        with tarfile.open(archive_path, 'r:gz') as archive:
+            member = next(
+                (item for item in archive.getmembers()
+                 if item.isfile() and os.path.basename(item.name) == pdb_name),
+                None,
+            )
+            if member is None:
+                print('  WARNING: best pose ' + pdb_name + ' is missing from ' + archive_path,
+                      file=sys.stderr)
+                return None
+            source = archive.extractfile(member)
+            if source is None:
+                print('  WARNING: could not read best pose ' + pdb_name + ' from archive',
+                      file=sys.stderr)
+                return None
+            output_path = os.path.join(res_dir, pdb_name)
+            with source, open(output_path, 'wb') as output_fh:
+                shutil.copyfileobj(source, output_fh)
+
+        print('  Kept best pose ' + pdb_name + ' (weighted score ' + str(best_score) + ')')
+        return output_path
+    except (OSError, csv.Error, tarfile.TarError) as exc:
+        print('  WARNING: could not retain best-scoring PDB: ' + str(exc), file=sys.stderr)
+        return None
 
 # ── Round 2 runs ONLY the round-1 best-score anchor for this ligand ──
 # (map derived by the controller from step3's scores_round1.csv: placement
@@ -291,12 +352,12 @@ for residue in residues:
         print(f'  SKIP: raw_scores.csv already exists for {{lig_name}}/{{res}}')
         continue
     success = run_rosetta_discovery_search(
-        '{params.target_pdb}', res, '{params.motifs_file}',
+        '{params.target_pdb}', res, local_motifs_file,
         tp_dir, '{params.discovery_root}',
         '{params.atr}', '{params.rep}', '{params.ddg}',
         extra_args_file='{params.extra_params}' or None,
         work_dir=res_dir,
-        rosetta_sif='{params.sif_rosetta}'
+        rosetta_sif=local_rosetta_sif
     )
     if not success:
         pdbs = glob.glob(os.path.join(res_dir, '*.pdb'))
@@ -305,36 +366,60 @@ for residue in residues:
             print(f'WARNING: Rosetta produced no output for {{lig_name}}/{{res}}', file=sys.stderr)
         else:
             print(f'Rosetta: placements exist for {{lig_name}}/{{res}} despite non-zero exit')
+    best_pdb = keep_best_scoring_pdb(res_dir)
     for f in glob.glob(os.path.join(res_dir, '*')):
-        if not f.endswith('.csv'):
-            try:
-                if os.path.isdir(f):
-                    import shutil; shutil.rmtree(f)
-                else:
-                    os.remove(f)
-            except Exception:
-                pass
+        if f.endswith('.csv') or (best_pdb and os.path.abspath(f) == os.path.abspath(best_pdb)):
+            continue
+        try:
+            if os.path.isdir(f):
+                shutil.rmtree(f)
+            else:
+                os.remove(f)
+        except Exception:
+            pass
 
 print('Rosetta done for ' + lig_name)
+release_node_cached_files()
 sys.stdout.flush()
 sys.stderr.flush()
 open(os.path.join(batch_dir, round_name, lig_name + '.done_pre_exit'), 'w').close()
 os._exit(0)
 PYEOF
 
-            # ── Controller decides this chunk's queue: alternate between
-            # the queues in {params.rosetta_queue} ("long short") so roughly
-            # half the Rosetta work lands on each queue.
+            # ── Select the configured queue with the fewest pending jobs
+            # owned by this controller's LSF user. Re-query before every
+            # submission so new array elements affect the next decision.
             QLIST=({params.rosetta_queue})
-            CHUNK_Q="${{QLIST[$(( chunk % ${{#QLIST[@]}} ))]}}"
+            CHUNK_Q=""
+            LOWEST_PENDING=""
+            for Q in "${{QLIST[@]}}"; do
+                Q_JOB_IDS=$(bjobs -p -q "$Q" -o "jobid" -noheader 2>/dev/null)
+                Q_QUERY_STATUS=$?
+                if [ "$Q_QUERY_STATUS" -eq 0 ]; then
+                    Q_PENDING=$(printf '%s\n' "$Q_JOB_IDS" | sed '/^[[:space:]]*$/d' | wc -l)
+                    echo "Queue $Q: $Q_PENDING of my jobs pending"
+                    if [ -z "$LOWEST_PENDING" ] || [ "$Q_PENDING" -lt "$LOWEST_PENDING" ]; then
+                        CHUNK_Q="$Q"
+                        LOWEST_PENDING="$Q_PENDING"
+                    fi
+                else
+                    echo "WARNING: could not read my pending jobs for queue $Q"
+                fi
+            done
+            if [ -z "$CHUNK_Q" ]; then
+                CHUNK_Q="${{QLIST[0]}}"
+                echo "WARNING: no per-user queue data available; falling back to $CHUNK_Q"
+            else
+                echo "Selected queue $CHUNK_Q for chunk $((chunk+1))/$NUM_CHUNKS ($LOWEST_PENDING pending)"
+            fi
 
             ARRAY_JOB_NAME="smk_ros2_c${{chunk}}"
             ARRAY_JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
                 -q "$CHUNK_Q" \
-                -M 6000 \
+                -M 1500 \
                 -n 1 \
-                -R 'span[hosts=1] rusage[mem=6000]' \
+                -R 'span[hosts=1] rusage[mem=1500]' \
                 -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
                 -o "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.out" \
                 -e "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.err" \
@@ -371,16 +456,15 @@ PYEOF
                 # On this cluster `bjobs -J <numeric-id>` matches job NAMES
                 # only and silently returns nothing. Only RUN/PEND/... states
                 # keep the loop alive; DONE elements are not running.
-                # No stuck-array watchdog: LSF kills the chunk at its 8h
-                # walltime, so an idle array cannot hang forever, and the old
-                # watchdog's element check compared a multi-line status
-                # against "RUN" and bkilled every healthy array.
+                # `bjobs` without `-a` reports only active array elements. Once
+                # every element is DONE/EXIT (or has aged out of mbatchd), it
+                # returns no status rows. Therefore empty output means this
+                # array has no live elements; it must not keep the controller
+                # waiting forever. Two clean polls below guard against a
+                # transient empty response, and the final .done_pre_exit check
+                # prevents a query glitch from marking incomplete work done.
                 ELEM_STATS=$(bjobs -o "stat" -noheader "$ARRAY_JID" 2>/dev/null | tr -d ' ')
-                if [ -z "$ELEM_STATS" ]; then
-                    # bjobs returned nothing (transient query failure while the
-                    # cluster is saturated) — unknown is NOT finished, keep waiting.
-                    STILL_RUNNING=1
-                elif echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
+                if echo "$ELEM_STATS" | grep -qE 'RUN|PEND|WAIT|USUSP|PSUSP|SSUSP'; then
                     STILL_RUNNING=1
                 fi
             done
