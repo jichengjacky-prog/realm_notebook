@@ -265,9 +265,9 @@ PYEOF
             ARRAY_JOB_ID=$(bsub \
                 -W {params.rosetta_walltime} \
                 -q "$CHUNK_Q" \
-                -M 1500 \
+                -M 2000 \
                 -n 1 \
-                -R 'span[hosts=1] rusage[mem=1500]' \
+                -R 'span[hosts=1] rusage[mem=2000]' \
                 -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
                 -o "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.out" \
                 -e "$BATCH_DIR/$ROUND/ros1_chunk_${{chunk}}_%I.err" \
