@@ -41,6 +41,7 @@ rule aggregate_results:
         mem_mb=16000,
         cpus=1,
         queue=LSF_QUEUE_DEFAULT,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "aggregate_results.log"),
@@ -126,6 +127,7 @@ rule cleanup_intermediates:
         mem_mb=2000,
         cpus=1,
         queue=LSF_QUEUE_DEFAULT,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "cleanup_intermediates.log"),

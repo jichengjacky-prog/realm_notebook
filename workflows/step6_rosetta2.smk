@@ -54,6 +54,7 @@ rule rosetta_discovery_round2:
         # Controller job: submits the arrays, then polls up to MAX_WAIT_HOURS.
         # Stays on the long queue; the serial Rosetta arrays use both queues.
         queue=LSF_QUEUE_MONITOR,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime="168:00",
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "rosetta_round2.log"),
@@ -239,6 +240,10 @@ for base, res in out.items():
             cat > "$CHUNK_SCRIPT" << 'PYEOF'
 import sys, os, glob, atexit, csv, shutil, tarfile
 
+sys.stdout.reconfigure(line_buffering=True, write_through=True)
+sys.stderr.reconfigure(line_buffering=True, write_through=True)
+os.environ['PYTHONUNBUFFERED'] = '1'
+
 atexit.register(sys.stdout.flush)
 atexit.register(sys.stderr.flush)
 
@@ -419,11 +424,11 @@ PYEOF
                 -q "$CHUNK_Q" \
                 -M 2000 \
                 -n 1 \
-                -R 'span[hosts=1] rusage[mem=2000]' \
+                -R "{resources.lsf_host_select}span[hosts=1] rusage[mem=2000]" \
                 -J "${{ARRAY_JOB_NAME}}[1-${{N}}]" \
                 -o "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.out" \
                 -e "$BATCH_DIR/$ROUND/ros2_chunk_${{chunk}}_%I.err" \
-                {params.python_bin} "$CHUNK_SCRIPT" "$BATCH_DIR" "$ROUND" $LIG_LIST "$RES_MAP_FILE" \
+                {params.python_bin} -u "$CHUNK_SCRIPT" "$BATCH_DIR" "$ROUND" $LIG_LIST "$RES_MAP_FILE" \
                 2>&1 | grep -oP '<\d+>' | tr -d '<>' || true)
             [ -n "$ARRAY_JOB_ID" ] && ARRAY_JOB_IDS+=("$ARRAY_JOB_ID")
             echo "Submitted chunk $((chunk+1))/$NUM_CHUNKS: ${{ARRAY_JOB_NAME}}[1-${{N}}] ($ARRAY_JOB_ID) on queue $CHUNK_Q — ${{N}} ligands"

@@ -6,6 +6,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import os
+import re
 
 # ── Paths & parameters (read from config dict, set by configfile: directive) ──
 SNAKEFILE_DIR  = workflow.basedir if hasattr(workflow, 'basedir') else os.getcwd()
@@ -65,6 +66,23 @@ LSF_WALLTIME_DEFAULT  = config.get("lsf_walltime_default",  "4:00")
 LSF_QUEUE_MONITOR    = config.get("lsf_queue_monitor",    "long")
 LSF_QUEUE_BOTH   = config.get("lsf_queue_both",    "long short")
 LSF_WALLTIME_BOTH =  config.get("lsf_walltime_both",    "8:00")
+
+# Exact execution-host names to exclude from all pipeline LSF submissions.
+# Validate before interpolating into shell commands; retain LSF's usual
+# type==local restriction when adding the hname string resource.
+LSF_EXCLUDE_HOSTS = config.get("lsf_exclude_hosts", [])
+if LSF_EXCLUDE_HOSTS is None:
+    LSF_EXCLUDE_HOSTS = []
+if not isinstance(LSF_EXCLUDE_HOSTS, list):
+    raise ValueError("lsf_exclude_hosts must be a YAML list of host names")
+if any(not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host)
+       for host in LSF_EXCLUDE_HOSTS):
+    raise ValueError("lsf_exclude_hosts entries must contain only letters, digits, dots, underscores, or hyphens")
+LSF_EXCLUDE_HOSTS = list(dict.fromkeys(LSF_EXCLUDE_HOSTS))
+LSF_HOST_SELECT = (
+    "select[type==local&&" + "&&".join(f"hname!='{host}'" for host in LSF_EXCLUDE_HOSTS) + "] "
+    if LSF_EXCLUDE_HOSTS else ""
+)
 
 # ── Helper: batch file path (sharded into subdirectories) ────────────────
 def batch_file_path(batch_id):

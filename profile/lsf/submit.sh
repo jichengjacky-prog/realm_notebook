@@ -6,7 +6,7 @@
 
 # Extract the jobscript path (last argument) from bsub options (all others)
 JOBSCRIPT="${@: -1}"
-BSB_ARGS="${@:1:$#-1}"
+BSB_ARGS=("${@:1:$#-1}")
 
 # Submit via stdin redirection and extract the numeric job ID
-bsub -u '' $BSB_ARGS < "$JOBSCRIPT" 2>&1 | sed -n 's/.*Job <\([0-9]*\)>.*/\1/p'
+bsub -u '' "${BSB_ARGS[@]}" < "$JOBSCRIPT" 2>&1 | sed -n 's/.*Job <\([0-9]*\)>.*/\1/p'

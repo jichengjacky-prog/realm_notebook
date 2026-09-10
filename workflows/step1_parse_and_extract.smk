@@ -103,6 +103,7 @@ rule extract_params:
         mem_mb=2000,
         cpus=1,
         queue=LSF_QUEUE_ROSETTA,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(TMP_ROOT, "batch_{batch_id}", "extract_params.log"),

@@ -44,6 +44,7 @@ rule filter_top_round1:
         mem_mb=16000,
         cpus=1,
         queue=LSF_QUEUE_DEFAULT,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime=LSF_WALLTIME_DEFAULT,
     log:
         os.path.join(OUTPUT_DIR, "filter_top_round1.log"),

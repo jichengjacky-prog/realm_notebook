@@ -10,11 +10,16 @@ Consolidates reusable logic from:
 """
 
 import os
+import codecs
+import locale
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     import CDPL
@@ -139,7 +144,7 @@ def cache_file_on_node(source_path, cache_dir=None):
 
 			if (os.path.isfile(cached_path)
 					and os.path.getsize(cached_path) == source_stat.st_size):
-				print(f"Using node-local cache: {cached_path}")
+				print(f"Using node-local cache: {cached_path}", flush=True)
 				return _register_node_cache_lease(cached_path)
 
 			free_bytes = shutil.disk_usage(cache_dir).free
@@ -148,14 +153,14 @@ def cache_file_on_node(source_path, cache_dir=None):
 				raise OSError("insufficient node-local disk space")
 
 			tmp_path = f"{cached_path}.tmp.{os.getpid()}"
-			print(f"Staging {source_path} to node-local cache {cached_path}")
+			print(f"Staging {source_path} to node-local cache {cached_path}", flush=True)
 			shutil.copyfile(source_path, tmp_path)
 			if os.path.getsize(tmp_path) != source_stat.st_size:
 				raise OSError("node-local copy has the wrong size")
 			os.chmod(tmp_path, 0o600)
 			os.replace(tmp_path, cached_path)
 			tmp_path = None
-			print(f"Node-local cache ready: {cached_path}")
+			print(f"Node-local cache ready: {cached_path}", flush=True)
 			return _register_node_cache_lease(cached_path)
 	except (OSError, IOError) as exc:
 		print(
@@ -636,51 +641,110 @@ def extract_smiles_from_params(params_text):
 # Shell helpers
 # ---------------------------------------------------------------------------
 
+_COMMAND_TERM_GRACE = 2.0
+
+
+def _terminate_command_group(proc):
+	"""Stop this command's private process group, even if its shell exited."""
+	try:
+		os.killpg(proc.pid, signal.SIGTERM)
+	except ProcessLookupError:
+		pass
+	deadline = time.monotonic() + _COMMAND_TERM_GRACE
+	while time.monotonic() < deadline:
+		proc.poll()
+		try:
+			os.killpg(proc.pid, 0)
+		except ProcessLookupError:
+			break
+		time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+	try:
+		os.killpg(proc.pid, signal.SIGKILL)
+	except ProcessLookupError:
+		pass
+	try:
+		proc.wait(timeout=_COMMAND_TERM_GRACE)
+	except subprocess.TimeoutExpired:
+		print("WARNING: command did not exit after SIGKILL", file=sys.stderr, flush=True)
+
+
 def run_cmd(cmd, cwd=None, description="", stream_output=True, timeout=None):
-	"""Run a shell command. Returns returncode.
+	"""Run a shell command, returning its exit code or -1 on timeout.
 
-	When stream_output=True (default), stdout/stderr are printed in real time
-	so long-running commands don't appear stuck.  Set to False to capture and
-	print only after completion.
-
-	If timeout (seconds) is given and the command exceeds it, the subprocess
-	is killed (SIGTERM then SIGKILL) and the function returns -1.
+	Streaming output is flushed immediately, including partial lines. Capture
+	mode prints stdout and stderr separately after completion. The monotonic
+	deadline covers output reads, silence, and inherited pipes after shell exit.
+	Timeout sends SIGTERM then SIGKILL to the command's private process group.
+	Descendants that deliberately leave that group need scheduler enforcement.
 	"""
 	if description:
-		print(f"  {description}")
+		print(f"  {description}", flush=True)
+	deadline = None if timeout is None else time.monotonic() + timeout
+	env = os.environ.copy()
+	env['PYTHONUNBUFFERED'] = '1'
+	proc = subprocess.Popen(
+		cmd, shell=True, cwd=cwd, env=env, start_new_session=True,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.STDOUT if stream_output else subprocess.PIPE, bufsize=0,
+	)
+	selector = selectors.DefaultSelector()
+	streams = []
 
-	if stream_output:
-		# Stream output in real time — essential for long-running commands
-		# so the user can see progress and diagnose hangs.
-		with subprocess.Popen(
-			cmd, shell=True, cwd=cwd,
-			stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-			text=True, bufsize=1
-		) as proc:
-			try:
-				for line in proc.stdout:
-					print(line, end="")
-				proc.wait(timeout=timeout)
-				return proc.returncode
-			except subprocess.TimeoutExpired:
-				print(f"\n  TIMEOUT: command exceeded {timeout}s — killing process tree", file=sys.stderr)
-				proc.kill()
+	def emit(state, data, final=False):
+		text = state[2].decode(data, final=final)
+		if text:
+			if stream_output:
+				state[1].write(text)
+				state[1].flush()
+			else:
+				state[3].append(text)
+
+	timed_out = False
+	try:
+		for pipe, target in ((proc.stdout, sys.stdout), (proc.stderr, sys.stderr)):
+			if pipe is not None:
+				decoder = codecs.getincrementaldecoder(locale.getpreferredencoding(False))(errors='replace')
+				state = (pipe, target, decoder, [])
+				streams.append(state)
+				os.set_blocking(pipe.fileno(), False)
+				selector.register(pipe, selectors.EVENT_READ, state)
+		while selector.get_map() or proc.poll() is None:
+			remaining = None if deadline is None else deadline - time.monotonic()
+			if remaining is not None and remaining <= 0:
+				timed_out = True
+				print(f"\n  TIMEOUT: command exceeded {timeout}s — terminating process group {proc.pid}",
+				      file=sys.stderr, flush=True)
+				_terminate_command_group(proc)
+				break
+			for key, _ in selector.select(0.1 if remaining is None else min(0.1, remaining)):
 				try:
-					proc.wait(timeout=30)
-				except subprocess.TimeoutExpired:
-					print("  WARNING: process did not respond to SIGKILL", file=sys.stderr)
-				return -1
-	else:
-		try:
-			result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd, timeout=timeout)
-		except subprocess.TimeoutExpired:
-			print(f"\n  TIMEOUT: command exceeded {timeout}s", file=sys.stderr)
-			return -1
-		if result.stdout:
-			print(result.stdout, end="")
-		if result.stderr:
-			print(result.stderr, file=sys.stderr, end="")
-		return result.returncode
+					data = os.read(key.fd, 65536)
+				except BlockingIOError:
+					continue
+				emit(key.data, data, final=not data)
+				if not data:
+					selector.unregister(key.fileobj)
+		# Bounded tail read: never wait for an escaped descendant's pipe.
+		if timed_out:
+			for key in list(selector.get_map().values()):
+				try:
+					data = os.read(key.fd, 65536)
+				except BlockingIOError:
+					data = b''
+				emit(key.data, data, final=True)
+		if not stream_output:
+			for _, target, _, chunks in streams:
+				target.write(''.join(chunks))
+				target.flush()
+		return -1 if timed_out else proc.returncode
+	except BaseException:
+		_terminate_command_group(proc)
+		raise
+	finally:
+		selector.close()
+		for pipe in (proc.stdout, proc.stderr):
+			if pipe is not None:
+				pipe.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1295,9 +1359,9 @@ def run_rosetta_discovery_search(target_pdb, anchor_residue_string, motifs_file,
 			"/rosetta/source/bin/ligand_discovery_search_protocol.linuxgccrelease @/input/args",
 		])
 		##debug print the command
-		print(rosetta_cmd)
+		print(rosetta_cmd, flush=True)
 
-		print("Running Rosetta discovery search...")
+		print("Running Rosetta discovery search...", flush=True)
 		rosetta_result  = run_cmd(rosetta_cmd, timeout=36000)  # 10h timeout
 
 		if rosetta_result != 0:

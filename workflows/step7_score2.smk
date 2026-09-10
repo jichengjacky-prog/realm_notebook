@@ -32,6 +32,7 @@ rule score_round2:
         mem_mb=2000,
         cpus=1,
         queue=LSF_QUEUE_DEFAULT,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime=LSF_WALLTIME_DEFAULT,
     params:
         weights_file = WEIGHTS_FILE,

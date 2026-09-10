@@ -12,7 +12,12 @@ scheduler: greedy
 # Note: bsub stdout/stderr are not captured with -o/-e — rule-level logs
 # are written by Snakemake's log: directive under tmp_root (which is under
 # output_dir).  LSF's own job output goes to the default location.
-cluster-generic-submit-cmd: "bash profile/lsf/submit.sh -q {resources.queue} -M {resources.mem_mb} -n {resources.cpus} -W {resources.walltime} -J 'smk.{rule}.{jobid}' -R 'rusage[mem={resources.mem_mb}]'"
+cluster-generic-submit-cmd: >-
+  bash profile/lsf/submit.sh -q "{resources.queue}" -M {resources.mem_mb} -n {resources.cpus} -W {resources.walltime} -J 'smk.{rule}.{jobid}' -R "{resources.lsf_host_select}rusage[mem={resources.mem_mb}]"
+
+# Rules outside the shared workflows retain the original unrestricted default.
+default-resources:
+  - "lsf_host_select=''"
 
 # ── LSF job status check ───────────────────────────────────────────────────
 # Snakemake calls this with the LSF job ID to check if it's still running.

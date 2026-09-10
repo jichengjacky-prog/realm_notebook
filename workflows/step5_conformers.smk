@@ -37,6 +37,7 @@ rule generate_conformers:
         mem_mb=2000,
         cpus=1,
         queue=LSF_QUEUE_DEFAULT,
+        lsf_host_select=LSF_HOST_SELECT,
         walltime="2:00",
     params:
         realm_location = REALM_LOCATION,
@@ -128,7 +129,7 @@ PYEOF
                 -W {resources.walltime} \
                 -M 4000 \
                 -n 1 \
-                -R 'span[hosts=1] rusage[mem=4000]' \
+                -R "{resources.lsf_host_select}span[hosts=1] rusage[mem=4000]" \
                 -J "$JOB_NAME" \
                 -o "$BATCH_DIR/genconf_$lig_name.out" \
                 -e "$BATCH_DIR/genconf_$lig_name.err" \

@@ -32,6 +32,10 @@ rep:             150.0   # fa_rep cutoff
 ddg:             -9.0    # ddg cutoff
 
 # ── Optional ─────────────────────────────────────────────────────────────────
+# Exclude exact LSF execution-host names, e.g. [r640c15, r640c16].
+# Applies to new submissions after restarting/reloading controllers, not jobs
+# already queued or running. Leave empty to disable host exclusion.
+lsf_exclude_hosts: []
 extra_params:    "extra_arg/sample_extra_arg"      # path to extra Rosetta args file
 # weights_file:    ""       # custom score weights CSV (default: score_weights.json)
 # tmp_root:         ""      # temp directory (default: output_dir/tmp)
